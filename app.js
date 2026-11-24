@@ -87,7 +87,7 @@ function ingest(events, up) {
     }
   }
 }
-async function refresh() {
+async function refresh(manual) {
   const btn = $('#refresh'); btn.disabled = true; btn.classList.add('busy');
   try {
     setStatus('Mise à jour des données…');
@@ -114,9 +114,11 @@ async function refresh() {
     db.upcoming = Object.values(up).sort((x, y) => (x.t < y.t ? -1 : 1));
     db.updatedAt = new Date().toISOString();
     save();
+    let oddsMsg = '';
+    try { await fetchOdds(manual === true ? 20 * 60e3 : 3 * 3600e3); } catch (e) { oddsMsg = ` · cotes indisponibles (${e.message === 'Failed to fetch' ? 'réseau ou accès bloqué' : e.message})`; }
     render();
     const hh = new Date(db.updatedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-    setStatus(`À jour · ${hh}` + (errors.length ? ` · ${errors.length} jour(s) en échec` : ''), errors.length > 0);
+    setStatus(`À jour · ${hh}` + (errors.length ? ` · ${errors.length} jour(s) en échec` : '') + oddsMsg, errors.length > 0 || !!oddsMsg);
   } catch (e) {
     save();
     setStatus(`Échec de la mise à jour (${e.message}). Données en cache affichées.`, true);
@@ -232,8 +234,79 @@ function lineTxt(s, H, A) {
 }
 const winTxt = (m, H, A, d = 1) => `${m >= 0 ? H.ab : A.ab} +${fr(Math.abs(m), d)}`;   // « BOS +5,5 » : BOS gagne de 5,5
 
+// ---------- Cotes Betclic (The Odds API, clé gratuite saisie dans l'appli) ----------
+const ODDS_URL = 'https://api.the-odds-api.com/v4/sports/basketball_nba/odds/';
+const KEY_LS = 'nbaPredict.oddsKey';
+const SIG_M = 12, EV_MIN = 0.03, EV_PICK = 0.05, EV_SUSPECT = 0.15;   // écart-type d'une marge NBA ; seuils de valeur
+const getKey = () => { try { return localStorage.getItem(KEY_LS) || ''; } catch (e) { return ''; } };
+const nick = (n) => String(n).toLowerCase().replace(/[^a-z0-9 ]/g, '').trim().split(/\s+/).pop();
+const Phi = (z) => {                                // loi normale : probabilité cumulée
+  const t = 1 / (1 + 0.2316419 * Math.abs(z)), d = 0.3989423 * Math.exp(-z * z / 2);
+  const q = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return z > 0 ? 1 - q : q;
+};
+async function fetchOdds(maxAge) {
+  const key = getKey(); if (!key) return;
+  if (db.odds && Date.now() - Date.parse(db.odds.at) < maxAge) return;
+  const r = await fetch(`${ODDS_URL}?apiKey=${encodeURIComponent(key)}&bookmakers=betclic_fr&markets=h2h,spreads,totals&oddsFormat=decimal&dateFormat=iso`);
+  if (!r.ok) throw new Error(r.status === 401 ? 'clé refusée' : r.status === 429 ? 'quota de la clé atteint' : 'HTTP ' + r.status);
+  const left = r.headers.get('x-requests-remaining');
+  const items = [];
+  for (const ev of await r.json()) {
+    const bk = (ev.bookmakers || []).find((b) => b.key === 'betclic_fr'); if (!bk) continue;
+    const it = { t: ev.commence_time, h: nick(ev.home_team), a: nick(ev.away_team) };
+    for (const m of bk.markets || []) {
+      const out = m.outcomes || [];
+      if (m.key === 'h2h') {
+        const o = (n) => (out.find((x) => nick(x.name) === n) || {}).price;
+        if (o(it.h) && o(it.a)) it.ml = { h: o(it.h), a: o(it.a) };
+      } else if (m.key === 'spreads') {
+        const h = out.find((x) => nick(x.name) === it.h), w = out.find((x) => nick(x.name) === it.a);
+        if (h && w) it.sp = { pt: h.point, h: h.price, a: w.price };
+      } else if (m.key === 'totals') {
+        const ov = out.find((x) => x.name === 'Over'), un = out.find((x) => x.name === 'Under');
+        if (ov && un) it.tot = { pt: ov.point, o: ov.price, u: un.price };
+      }
+    }
+    items.push(it);
+  }
+  db.odds = { at: new Date().toISOString(), items, left: left === null ? null : Number(left) };
+  save();
+}
+function findOdds(g) {
+  if (!db.odds) return null;
+  const h = nick(T(g.h).n), a = nick(T(g.a).n);
+  return db.odds.items.find((x) => x.h === h && x.a === a && Math.abs(Date.parse(x.t) - Date.parse(g.t)) < 12 * 3600e3) || null;
+}
+// Cotes Betclic d'un match + valeur (probabilité du modèle × cote − 1) de chaque pari possible.
+function oddsBlock(g, M, ctx) {
+  const o = findOdds(g); if (!o) return { html: '', bets: [] };
+  const H = T(g.h), A = T(g.a), bets = [], parts = [];
+  const sigT = (M.tot.mae || 14) * 1.2533;
+  if (o.ml) {
+    parts.push(`${esc(A.ab)} <b>${fr(o.ml.a, 2)}</b> · ${esc(H.ab)} <b>${fr(o.ml.h, 2)}</b>`);
+    bets.push({ label: `${A.ab} gagne`, p: ctx.pa, odds: o.ml.a }, { label: `${H.ab} gagne`, p: ctx.ph, odds: o.ml.h });
+  }
+  if (o.sp) {
+    const pc = Phi((ctx.margin + o.sp.pt) / SIG_M);
+    const f = (ab, pt) => `${ab} ${pt > 0 ? '+' : '-'}${fr(Math.abs(pt))}`;
+    parts.push(`Handicap ${esc(f(H.ab, o.sp.pt))} (${fr(o.sp.h, 2)}) / ${esc(f(A.ab, -o.sp.pt))} (${fr(o.sp.a, 2)})`);
+    bets.push({ label: f(H.ab, o.sp.pt), p: pc, odds: o.sp.h }, { label: f(A.ab, -o.sp.pt), p: 1 - pc, odds: o.sp.a });
+  }
+  if (o.tot) {
+    const po = 1 - Phi((o.tot.pt - ctx.tot) / sigT);
+    parts.push(`Total ${fr(o.tot.pt)} : Over <b>${fr(o.tot.o, 2)}</b> · Under <b>${fr(o.tot.u, 2)}</b>`);
+    bets.push({ label: `Over ${fr(o.tot.pt)}`, p: po, odds: o.tot.o }, { label: `Under ${fr(o.tot.pt)}`, p: 1 - po, odds: o.tot.u });
+  }
+  for (const b of bets) b.ev = b.p * b.odds - 1;
+  const good = bets.filter((b) => b.ev >= EV_MIN).sort((x, y) => y.ev - x.ev);
+  let html = parts.map((x) => `<div class="line">Betclic · ${x}</div>`).join('');
+  if (good.length) html += `<div class="line">Valeur : ${good.slice(0, 2).map((b) => `<b class="pick">${esc(b.label)} @ ${fr(b.odds, 2)} (${signed(b.ev * 100)} %)</b>`).join(' · ')}</div>`;
+  return { html, bets };
+}
+
 // ---------- Affichage : onglet À venir ----------
-function upCard(g, M) {
+function upCard(g, M, picks) {
   const H = T(g.h), A = T(g.a), day = dayKey(g.t);
   const eh = M.elo[g.h] ?? 1500, ea = M.elo[g.a] ?? 1500;
   const diff = eh - ea + HFA + fatigue(g.h, g.a, day, M.last);
@@ -252,6 +325,8 @@ function upCard(g, M) {
     const d = pt.tot - ou;
     l3 += ` · O/U ESPN ${fr(ou)} → <b class="${Math.abs(d) >= OU_EDGE ? 'pick' : ''}">${d >= 0 ? 'Over' : 'Under'} (${signed(d, 1)})</b>`;
   } else l3 += ' · pas de ligne O/U pour l\'instant';
+  const bt = oddsBlock(g, M, { ph, pa, margin, tot: pt.tot });
+  if (picks) for (const b of bt.bets) picks.push({ ...b, g, time });
   return `<div class="card">
     <div class="meta"><span>${esc(time)}${g.live ? ' · <span class="live">EN COURS</span>' : ''}</span><span class="${tagCls}">${esc(tag)}</span></div>
     <div class="teams"><span>${esc(A.n)}</span><span class="at">@</span><span>${esc(H.n)}</span></div>
@@ -259,19 +334,24 @@ function upCard(g, M) {
     <div class="probs"><span>${esc(A.ab)} ${(pa * 100).toFixed(0)}%</span><span>${esc(H.ab)} ${(ph * 100).toFixed(0)}%</span></div>
     <div class="line">Marge modèle : <b>${esc(winTxt(margin, H, A))}</b></div>
     <div class="line">${l2}</div>
-    <div class="line">${l3}</div></div>`;
+    <div class="line">${l3}</div>${bt.html}</div>`;
 }
 function renderUp(M) {
   const box = $('#games'), now = Date.now();
   const list = db.upcoming.filter((g) => g.live || Date.parse(g.t) > now - 3 * 3600e3);
   if (!list.length) { box.innerHTML = '<div class="empty">Aucun match à venir trouvé.</div>'; return; }
   let html = '', cur = '';
+  const picks = [];
   for (const g of list) {
     const d = new Date(g.t), key = ymd(d);
     if (key !== cur) { cur = key; html += `<div class="day">${esc(dayLabel(d))}</div>`; }
-    html += upCard(g, M);
+    html += upCard(g, M, picks);
   }
   box.innerHTML = html;
+  const top = picks.filter((b) => b.ev >= EV_PICK).sort((x, y) => y.ev - x.ev).slice(0, 5);
+  $('#picks').innerHTML = top.length
+    ? `<h2>Paris à valeur (Betclic)</h2><div class="grp picks">` + top.map((b) => `<div class="pk"><div><b>${esc(b.label)}</b> @ ${fr(b.odds, 2)}<span>${esc(T(b.g.a).ab)} @ ${esc(T(b.g.h).ab)} · ${esc(b.time)}</span></div><div class="${b.ev >= EV_SUSPECT ? 'ko' : 'ok'}">${signed(b.ev * 100)} %${b.ev >= EV_SUSPECT ? '<span>à vérifier</span>' : ''}</div></div>`).join('') + `</div><p class="note">Valeur = probabilité du modèle × cote − 1. Un écart très grand vient souvent d'une info que le modèle n'a pas (blessure, repos) : vérifie avant de miser.</p>`
+    : (getKey() ? '' : '<div class="note">Ajoute ta clé gratuite dans l\'onglet Modèle pour voir les cotes Betclic et les paris à valeur.</div>');
 }
 
 // ---------- Affichage : onglet Modèle ----------
@@ -311,7 +391,11 @@ function renderModel(M) {
   const teams = Object.keys(M.elo).sort((a, b) => M.elo[b] - M.elo[a]);
   $('#rank').innerHTML = '<tr><th>#</th><th>Équipe</th><th class="n">Elo</th></tr>'
     + teams.map((id, i) => `<tr><td>${i + 1}</td><td>${esc(T(id).n)}</td><td class="n">${Math.round(M.elo[id])}</td></tr>`).join('');
-  $('#modelnote').textContent = `Modèle v2.0 : Elo (avantage du terrain, marge, fatigue) pour le vainqueur ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
+  $('#oddsKey').value = getKey();
+  $('#oddsInfo').textContent = !getKey() ? 'Pas de clé : les cotes Betclic ne sont pas chargées.'
+    : db.odds ? `Cotes chargées à ${new Date(db.odds.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${db.odds.items.length} matchs${db.odds.left !== null && db.odds.left !== undefined ? ' · ' + db.odds.left + ' crédits restants ce mois-ci' : ''}`
+    : 'Clé enregistrée, cotes pas encore chargées.';
+  $('#modelnote').textContent = `Modèle v2.1 : Elo (avantage du terrain, marge, fatigue) pour le vainqueur ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
 }
 
 // ---------- Affichage : onglet Joués ----------
@@ -426,7 +510,12 @@ for (const [sel, key] of [['#fTeam', 'team'], ['#fOpp', 'opp'], ['#fSeason', 'se
   $(sel).addEventListener('change', (e) => { view[key] = e.target.value; view.shown = 25; renderPlayed(); });
 }
 $('#more').addEventListener('click', () => { view.shown += 25; renderPlayed(); });
-$('#refresh').addEventListener('click', refresh);
+$('#refresh').addEventListener('click', () => refresh(true));
+$('#saveKey').addEventListener('click', () => {
+  const v = $('#oddsKey').value.trim();
+  try { if (v) localStorage.setItem(KEY_LS, v); else localStorage.removeItem(KEY_LS); } catch (e) {}
+  db.odds = null; save(); refresh(true);
+});
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && (!db.updatedAt || Date.now() - Date.parse(db.updatedAt) > 15 * 60e3)) refresh();
 });

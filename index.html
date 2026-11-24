@@ -90,6 +90,14 @@ td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
 th{color:var(--mut);font-weight:500;font-size:12px}
 td.n,th.n{text-align:right}
 
+.picks{padding:0 14px}
+.pk{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 0}
+.pk+.pk{border-top:1px solid var(--line)}
+.pk span{display:block;color:var(--mut);font-size:12px;font-weight:400}
+.pk>div:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.keybox{display:flex;gap:8px}
+.keybox input{flex:1;min-width:0;min-height:44px;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:0 12px;font:inherit}
+.keybox .more{width:auto;margin:0;padding:0 16px}
 /* barre du bas */
 nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top:1px solid var(--line);
   padding:8px max(12px,env(safe-area-inset-right)) max(50px,calc(14px + env(safe-area-inset-bottom))) max(12px,env(safe-area-inset-left))}
@@ -123,6 +131,7 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
   </section>
 
   <section id="tab-up">
+    <div id="picks"></div>
     <div id="games"><div class="empty">Aucune donnée pour l'instant.</div></div>
     <p class="note">Le total prévu vient du modèle pour chaque match. Le verdict Over/Under apparaît dès qu'ESPN publie sa ligne, en général peu avant le match.</p>
   </section>
@@ -134,6 +143,9 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
     <div id="totstats" class="stats"></div>
     <h2>Classement Elo</h2>
     <div class="scroll"><table id="rank"></table></div>
+    <h2>Cotes Betclic</h2>
+    <div class="keybox"><input id="oddsKey" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Clé The Odds API" aria-label="Clé The Odds API"><button id="saveKey" class="more" type="button">Enregistrer</button></div>
+    <p class="note" id="oddsInfo"></p>
     <p class="note" id="modelnote"></p>
   </section>
 </div>
