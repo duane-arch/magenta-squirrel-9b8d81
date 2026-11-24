@@ -1,7 +1,8 @@
 'use strict';
-// NBA Predict v1 : données ESPN (scoreboard) -> Elo -> prédictions.
+// NBA Predict v1.3 : données ESPN (scoreboard) -> Elo -> prédictions.
 const API = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard';
-const SEASON_START = '20251021';   // début de la base d'historique
+const SEASON_START = '20231024';   // début de la base d'historique : 3 saisons (2023-24 à aujourd'hui)
+const DB_VERSION = 2;
 const LS_KEY = 'nbaPredict.v1';
 const K = 20, HFA = 100, B2B = 40, PTS = 28;
 
@@ -14,8 +15,14 @@ const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); r
 
 let db = load();
 function load() {
-  try { const v = JSON.parse(localStorage.getItem(LS_KEY)); if (v && v.games) return v; } catch (e) {}
-  return { games: {}, teams: {}, upcoming: [], updatedAt: null };
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_KEY));
+    if (v && v.games) {
+      if (v.v !== DB_VERSION) { v.days = {}; v.v = DB_VERSION; }   // nouvelle version : on recharge les jours pour récupérer les détails
+      return v;
+    }
+  } catch (e) {}
+  return { v: DB_VERSION, games: {}, teams: {}, upcoming: [], updatedAt: null };
 }
 function save() { try { localStorage.setItem(LS_KEY, JSON.stringify(db)); } catch (e) {} }
 
@@ -46,6 +53,9 @@ function parseEvent(ev) {
   if (!h || !a || !h.team || !a.team) return null;
   const type = (ev.status && ev.status.type) || {};
   const o = c.odds && c.odds[0];
+  const lsOf = (x) => (x.linescores || []).map((l) => Number(l.value));
+  const lh = lsOf(h), la = lsOf(a);
+  const okLs = lh.length >= 4 && la.length >= 4 && lh.concat(la).every(Number.isFinite);
   return {
     id: String(ev.id), t: ev.date,
     h: { id: String(h.team.id), ab: h.team.abbreviation, n: h.team.displayName || h.team.name },
@@ -53,6 +63,7 @@ function parseEvent(ev) {
     hs: Number(h.score), as: Number(a.score),
     done: !!type.completed, live: type.state === 'in',
     odds: o ? { details: o.details || '', ou: o.overUnder || null } : null,
+    po: st === 3, ls: okLs ? { a: la, h: lh } : null,
   };
 }
 
@@ -61,7 +72,11 @@ function ingest(events, up) {
     const g = parseEvent(ev); if (!g) continue;
     db.teams[g.h.id] = { ab: g.h.ab, n: g.h.n }; db.teams[g.a.id] = { ab: g.a.ab, n: g.a.n };
     if (g.done && Number.isFinite(g.hs) && Number.isFinite(g.as)) {
-      db.games[g.id] = { t: g.t, h: g.h.id, a: g.a.id, hs: g.hs, as: g.as };
+      const rec = { t: g.t, h: g.h.id, a: g.a.id, hs: g.hs, as: g.as };
+      if (g.ls) rec.ls = g.ls;
+      if (g.po) rec.po = 1;
+      if (g.odds && g.odds.details) rec.o = g.odds.details;
+      db.games[g.id] = rec;
     } else if (!g.done) {
       up[g.id] = { id: g.id, t: g.t, h: g.h.id, a: g.a.id, live: g.live, odds: g.odds };
     }
@@ -75,7 +90,10 @@ async function refresh() {
     db.days = db.days || {};
     const today = new Date();
     const days = [];
-    for (let d = parseYmd(SEASON_START); d <= addDays(today, 3); d = addDays(d, 1)) days.push(ymd(d));
+    for (let d = parseYmd(SEASON_START); d <= addDays(today, 3); d = addDays(d, 1)) {
+      const mo = d.getMonth();
+      if (mo < 6 || mo > 8) days.push(ymd(d));            // pas de matchs NBA de juillet à septembre
+    }
     const recent = ymd(addDays(today, -3));                 // les 3 derniers jours sont toujours rechargés
     const todo = days.filter((d) => d >= recent || !db.days[d]);
     const up = {}; const errors = []; let n = 0;
@@ -85,6 +103,7 @@ async function refresh() {
         if (d < recent) db.days[d] = 1;
       } catch (e) { errors.push(e.message); }
       n++;
+      if (n % 60 === 0) save();                              // on garde la progression si la page est fermée
       if (n % 5 === 0 || n === todo.length) setStatus(`Récupération des matchs… (${n}/${todo.length})`);
     });
     if (errors.length && errors.length === todo.length) throw new Error(errors[0]);
@@ -112,8 +131,8 @@ function fatigue(h, a, day, last) {
   return adj;
 }
 function runModel() {
-  const games = Object.values(db.games).sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
-  const elo = {}, cnt = {}, last = {}, log = []; let season = null;
+  const games = Object.entries(db.games).map(([id, g]) => ({ id, ...g })).sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
+  const elo = {}, cnt = {}, last = {}, log = [], pred = {}; let season = null;
   for (const g of games) {
     const sn = seasonOf(g.t);
     if (season !== null && sn !== season) {
@@ -125,6 +144,7 @@ function runModel() {
     const diff = eh - ea + HFA + fatigue(g.h, g.a, day, last);
     const p = 1 / (1 + Math.pow(10, -diff / 400));
     const win = g.hs > g.as ? 1 : 0, mov = Math.abs(g.hs - g.as);
+    pred[g.id] = { p, m: diff / PTS, warm: (cnt[g.h] || 0) < 15 || (cnt[g.a] || 0) < 15 };
     if ((cnt[g.h] || 0) >= 15 && (cnt[g.a] || 0) >= 15) log.push({ t: g.t, p, win });
     const dW = win ? diff : -diff;
     const mult = Math.pow(mov + 3, 0.8) / (7.5 + 0.006 * dW);
@@ -133,7 +153,7 @@ function runModel() {
     cnt[g.h] = (cnt[g.h] || 0) + 1; cnt[g.a] = (cnt[g.a] || 0) + 1;
     last[g.h] = day; last[g.a] = day;
   }
-  return { elo, cnt, last, log };
+  return { elo, cnt, last, log, pred };
 }
 function parseSpread(details, hAb, aAb) {           // ex. "BOS -5.5" -> marge attendue du domicile selon la ligne
   if (!details) return null;
@@ -149,6 +169,7 @@ function parseSpread(details, hAb, aAb) {           // ex. "BOS -5.5" -> marge a
 // ---------- Affichage ----------
 function render() {
   const M = runModel();
+  lastModel = M;
   const T = (id) => db.teams[id] || { ab: '?', n: 'Équipe ' + id };
   // matchs à venir
   const box = $('#games');
@@ -198,7 +219,102 @@ function render() {
   const teams = Object.keys(M.elo).sort((a, b) => M.elo[b] - M.elo[a]);
   $('#rank').innerHTML = '<tr><th>#</th><th>Équipe</th><th class="n">Elo</th></tr>'
     + teams.map((id, i) => `<tr><td>${i + 1}</td><td>${esc(T(id).n)}</td><td class="n">${Math.round(M.elo[id])}</td></tr>`).join('');
+  fillFilters();
+  renderPlayed();
 }
+
+// ---------- Matchs joués ----------
+const view = { team: '', opp: '', season: '', shown: 25 };
+let lastModel = null;
+const seasonLabel = (y) => `${y}-${pad((y + 1) % 100)}`;
+const signed = (x, d = 0) => (x >= 0 ? '+' : '') + x.toFixed(d);
+
+function fillFilters() {
+  const ids = Object.keys(db.teams).sort((a, b) => db.teams[a].n.localeCompare(db.teams[b].n, 'fr'));
+  const teamOpts = (all) => `<option value="">${all}</option>` + ids.map((id) => `<option value="${esc(id)}">${esc(db.teams[id].n)}</option>`).join('');
+  const seasons = [...new Set(Object.values(db.games).map((g) => seasonOf(g.t)))].sort((a, b) => b - a);
+  $('#fTeam').innerHTML = teamOpts('Toutes les équipes');
+  $('#fOpp').innerHTML = teamOpts('Tous les adversaires');
+  $('#fSeason').innerHTML = '<option value="">Toutes les saisons</option>' + seasons.map((y) => `<option value="${y}">${seasonLabel(y)}</option>`).join('');
+  $('#fTeam').value = view.team; $('#fOpp').value = view.opp; $('#fSeason').value = view.season;
+}
+
+function summaryTiles(list, A, B, M, T) {
+  let w = 0, hw = 0, hl = 0, aw = 0, al = 0, sm = 0, ok = 0, np = 0;
+  for (const g of list) {
+    const home = g.h === A, my = home ? g.hs : g.as, th = home ? g.as : g.hs;
+    if (my > th) { w++; if (home) hw++; else aw++; } else if (home) hl++; else al++;
+    sm += my - th;
+    const p = M.pred[g.id];
+    if (p) { np++; if ((p.p >= 0.5) === (g.hs > g.as)) ok++; }
+  }
+  const n = list.length, a = T(A).ab, b = B ? T(B).ab : '';
+  return [
+    [`${w}–${n - w}`, B ? `${a} contre ${b} (${n} matchs)` : `Victoires–défaites de ${a} (${n} matchs)`],
+    [`${hw}–${hl} · ${aw}–${al}`, 'Domicile · Extérieur'],
+    [signed(sm / n, 1), `Marge moyenne de ${a}`],
+    [np ? `${(ok / np * 100).toFixed(0)} %` : '–', 'Victoires bien prédites par le modèle'],
+  ];
+}
+
+function qTable(g, H, Aw) {
+  if (!g.ls) return '<div class="line">Détail par quart-temps indisponible pour ce match.</div>';
+  const n = Math.max(g.ls.a.length, g.ls.h.length);
+  const cols = Array.from({ length: n }, (_, i) => i);
+  const head = cols.map((i) => `<th class="n">${i < 4 ? 'Q' + (i + 1) : 'OT' + (i - 3)}</th>`).join('');
+  const row = (ab, arr, tot) => `<tr><td>${esc(ab)}</td>${cols.map((i) => `<td class="n">${arr[i] ?? ''}</td>`).join('')}<td class="n"><b>${tot}</b></td></tr>`;
+  return `<div class="scroll q"><table><tr><th></th>${head}<th class="n">Total</th></tr>${row(Aw.ab, g.ls.a, g.as)}${row(H.ab, g.ls.h, g.hs)}</table></div>`;
+}
+
+function renderPlayed() {
+  const M = lastModel; if (!M) return;
+  const T = (id) => db.teams[id] || { ab: '?', n: 'Équipe ' + id };
+  let A = view.team, B = view.opp;
+  if (!A && B) { A = B; B = ''; }
+  if (A === B) B = '';
+  let list = Object.entries(db.games).map(([id, g]) => ({ id, ...g }));
+  if (view.season) list = list.filter((g) => String(seasonOf(g.t)) === view.season);
+  if (A) list = list.filter((g) => g.h === A || g.a === A);
+  if (B) list = list.filter((g) => g.h === B || g.a === B);
+  list.sort((x, y) => (x.t < y.t ? 1 : x.t > y.t ? -1 : 0));
+
+  if (!list.length) {
+    $('#h2h').innerHTML = ''; $('#played').innerHTML = '<div class="empty">Aucun match pour ce filtre.</div>'; $('#more').hidden = true;
+    return;
+  }
+  $('#h2h').innerHTML = A
+    ? summaryTiles(list, A, B, M, T).map(([b, s]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(s)}</span></div>`).join('')
+    : '';
+
+  $('#played').innerHTML = list.slice(0, view.shown).map((g) => {
+    const H = T(g.h), Aw = T(g.a), p = M.pred[g.id], homeWin = g.hs > g.as;
+    const date = new Date(g.t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
+    let badge = '', l1 = '', l2 = '';
+    if (p) {
+      const pickHome = p.p >= 0.5, good = pickHome === homeWin, pk = pickHome ? p.p : 1 - p.p;
+      badge = `<span class="${good ? 'ok' : 'ko'}">${good ? '✓' : '✗'} modèle</span>`;
+      l1 = `Modèle : <b>${esc(pickHome ? H.ab : Aw.ab)} ${(pk * 100).toFixed(0)}%</b> · marge prévue ${esc(H.ab)} ${signed(p.m, 1)} · réelle ${esc(H.ab)} ${signed(g.hs - g.as)}`
+        + (p.warm ? ' · <i>modèle en rodage</i>' : '');
+    }
+    const sp = g.o ? parseSpread(g.o, H.ab, Aw.ab) : null;
+    if (sp !== null) {
+      const act = g.hs - g.as;
+      l2 = `Ligne ESPN : ${esc(H.ab)} ${signed(sp, 1)} · ` + (act === sp ? 'égalité' : `${esc(act > sp ? H.ab : Aw.ab)} couvre`);
+    }
+    const wa = homeWin ? '' : 'w', wh = homeWin ? 'w' : '';
+    return `<details class="game"><summary>
+      <div class="meta"><span>${esc(date)}${g.po ? ' · Playoffs' : ''}</span>${badge}</div>
+      <div class="score"><span class="${wa}" title="${esc(Aw.n)}">${esc(Aw.ab)}</span><span class="${wa}">${g.as}</span><span>–</span><span class="${wh}">${g.hs}</span><span class="${wh}" title="${esc(H.n)}">${esc(H.ab)}</span></div>
+      ${l1 ? `<div class="line">${l1}</div>` : ''}${l2 ? `<div class="line">${l2}</div>` : ''}
+      </summary>${qTable(g, H, Aw)}</details>`;
+  }).join('');
+  $('#more').hidden = list.length <= view.shown;
+}
+
+for (const [sel, key] of [['#fTeam', 'team'], ['#fOpp', 'opp'], ['#fSeason', 'season']]) {
+  $(sel).addEventListener('change', (e) => { view[key] = e.target.value; view.shown = 25; renderPlayed(); });
+}
+$('#more').addEventListener('click', () => { view.shown += 25; renderPlayed(); });
 
 // ---------- Démarrage ----------
 $('#refresh').addEventListener('click', refresh);

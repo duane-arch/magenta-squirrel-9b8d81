@@ -51,8 +51,23 @@ td.n,th.n{text-align:right}
 .stat b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
 .stat span{color:var(--mut);font-size:12px}
 .note{color:var(--mut);font-size:12px;margin-top:18px}
-details summary{cursor:pointer;color:var(--mut);font-size:13px;text-transform:uppercase;letter-spacing:.08em;margin:22px 0 8px;font-weight:600}
+details.sec summary{cursor:pointer;color:var(--mut);font-size:13px;text-transform:uppercase;letter-spacing:.08em;margin:22px 0 8px;font-weight:600}
 .empty{color:var(--mut);padding:14px 0}
+.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:10px}
+.filters label{display:flex;flex-direction:column;gap:3px;color:var(--mut);font-size:12px;min-width:0}
+select{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:9px 8px;font:inherit;width:100%;min-width:0}
+#h2h{margin-bottom:10px}
+#h2h:empty{display:none}
+details.game{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin-bottom:8px}
+details.game summary{cursor:pointer;list-style:none}
+details.game summary::-webkit-details-marker{display:none}
+.score{display:grid;grid-template-columns:1fr auto auto auto 1fr;gap:10px;align-items:baseline;margin:5px 0;font-variant-numeric:tabular-nums;font-size:17px}
+.score span:last-child{text-align:right}
+.score .w{font-weight:700}
+.ok{color:var(--ok)}
+.ko{color:var(--bad)}
+.q{margin-top:8px}
+#more{margin-top:6px;width:100%;background:var(--panel);color:var(--fg);border:1px solid var(--line)}
 </style>
 </head>
 <body>
@@ -69,12 +84,23 @@ details summary{cursor:pointer;color:var(--mut);font-size:13px;text-transform:up
   <h2>Fiabilité du modèle</h2>
   <div id="stats" class="stats"></div>
 
-  <details>
+  <h2>Matchs joués</h2>
+  <div class="filters">
+    <label for="fTeam">Équipe<select id="fTeam"></select></label>
+    <label for="fOpp">Adversaire<select id="fOpp"></select></label>
+    <label for="fSeason">Saison<select id="fSeason"></select></label>
+  </div>
+  <div id="h2h" class="stats"></div>
+  <div id="played"></div>
+  <button id="more" type="button" hidden>Voir plus de matchs</button>
+  <p class="note">Touche un match pour voir les points par quart-temps. Choisis une équipe puis un adversaire pour un face-à-face.</p>
+
+  <details class="sec">
     <summary>Classement Elo</summary>
     <div class="scroll"><table id="rank"></table></div>
   </details>
 
-  <p class="note">Modèle v1 : Elo avec avantage du terrain, marge de victoire et fatigue (match la veille). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre. <span id="ver">v1.2.1</span></p>
+  <p class="note">Modèle v1 : Elo avec avantage du terrain, marge de victoire et fatigue (match la veille). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre. <span id="ver">v1.3</span></p>
 </main>
 <script src="app.js"></script>
 </body>
