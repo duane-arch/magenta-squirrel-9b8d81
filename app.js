@@ -4,7 +4,7 @@ const API = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreb
 const SEASON_START = '20231024';   // début de la base d'historique : 3 saisons complètes + la saison en cours
 const DB_VERSION = 3;              // à changer pour forcer un rechargement complet des données
 const LS_KEY = 'nbaPredict.v1';
-const K = 20, HFA = 100, B2B = 40, PTS = 28;                    // Elo : vainqueur, marge
+const PTS = 28;                                                 // Elo : points d'Elo par point de marge
 const HCA = 1.5, LG0 = 113, LG_PRIOR_N = 300, WARM = 15;        // total de points
 const OU_EDGE = 5;                                              // écart (pts) à partir duquel le verdict Over/Under est mis en avant
 
@@ -130,11 +130,70 @@ async function refresh(manual) {
 const dayKey = (iso) => new Date(Date.parse(iso) - 6 * 3600e3).toISOString().slice(0, 10); // ~heure US
 const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 864e5);
 const seasonOf = (iso) => { const d = new Date(iso); return d.getUTCMonth() >= 7 ? d.getUTCFullYear() : d.getUTCFullYear() - 1; };
-function fatigue(h, a, day, last) {
-  let adj = 0;
-  if (last[h] && dayDiff(day, last[h]) === 1) adj -= B2B;
-  if (last[a] && dayDiff(day, last[a]) === 1) adj += B2B;
-  return adj;
+// Réglages de départ de l'Elo ; l'appli les ajuste seule sur tes données (voir tuneElo).
+const EBASE = { K: 20, HFA: 100, B2B: 40, R34: 0, REG: 0.25 };
+const ECAND = { K: [12, 16, 20, 24, 30], HFA: [60, 80, 100, 120], B2B: [0, 20, 40, 60], R34: [0, 15, 30], REG: [0.1, 0.25, 0.4] };
+const HOLD = 400;                                  // matchs les plus récents gardés de côté pour vérifier que le réglage aide vraiment
+function fatigue(h, a, day, st, prm) {             // pénalité de repos : match la veille, 3e match en 4 soirs
+  const f = (t) => {
+    let x = 0; const l = st.last[t];
+    if (l && dayDiff(day, l) === 1) x += prm.B2B;
+    const hs = st.hist[t];
+    if (hs && hs.filter((d) => { const n = dayDiff(day, d); return n >= 1 && n <= 3; }).length >= 2) x += prm.R34;
+    return x;
+  };
+  return f(a) - f(h);
+}
+const eloDiff = (M, h, a, day) => (M.elo[h] ?? 1500) - (M.elo[a] ?? 1500) + M.prm.HFA + fatigue(h, a, day, M.st, M.prm);
+const sigm = (x) => 1 / (1 + Math.exp(-x));
+const logit = (p) => Math.log(Math.min(0.999, Math.max(0.001, p)) / (1 - Math.min(0.999, Math.max(0.001, p))));
+function runElo(games, prm, keep) {
+  const elo = {}, cnt = {}, st = { last: {}, hist: {} }, log = [], pred = {}; let season = null;
+  games.forEach((g, i) => {
+    const sn = seasonOf(g.t);
+    if (season !== null && sn !== season) {
+      for (const k in elo) elo[k] = 1505 + (elo[k] - 1505) * (1 - prm.REG);
+      st.last = {}; st.hist = {};
+    }
+    season = sn;
+    const eh = elo[g.h] ?? 1500, ea = elo[g.a] ?? 1500, day = dayKey(g.t);
+    const diff = eh - ea + prm.HFA + fatigue(g.h, g.a, day, st, prm);
+    const p = 1 / (1 + Math.pow(10, -diff / 400));
+    const win = g.hs > g.as ? 1 : 0, mov = Math.abs(g.hs - g.as);
+    const warm = (cnt[g.h] || 0) >= 15 && (cnt[g.a] || 0) >= 15;
+    if (keep) pred[g.id] = { p, m: diff / PTS, cold: !warm };
+    if (warm) log.push({ i, t: g.t, p, win });
+    const dW = win ? diff : -diff;
+    const mult = Math.pow(mov + 3, 0.8) / (7.5 + 0.006 * dW);
+    const delta = prm.K * mult * (win - p);
+    elo[g.h] = eh + delta; elo[g.a] = ea - delta;
+    cnt[g.h] = (cnt[g.h] || 0) + 1; cnt[g.a] = (cnt[g.a] || 0) + 1;
+    for (const t of [g.h, g.a]) { st.last[t] = day; (st.hist[t] = st.hist[t] || []).push(day); if (st.hist[t].length > 4) st.hist[t].shift(); }
+  });
+  return { elo, cnt, st, log, pred };
+}
+const brierOf = (L) => L.length ? L.reduce((s, x) => s + (x.p - x.win) ** 2, 0) / L.length : NaN;
+const accOf = (L) => L.length ? L.filter((x) => (x.p >= 0.5) === (x.win === 1)).length / L.length : NaN;
+// Réglage automatique : on essaie quelques valeurs de chaque paramètre et on garde celles qui donnent le meilleur score de Brier.
+function tuneElo(games) {
+  const prm = { ...EBASE };
+  let best = brierOf(runElo(games, prm, false).log);
+  for (let pass = 0; pass < 2; pass++) for (const k of Object.keys(ECAND)) for (const v of ECAND[k]) {
+    if (v === prm[k]) continue;
+    const b = brierOf(runElo(games, { ...prm, [k]: v }, false).log);
+    if (b < best - 1e-6) { best = b; prm[k] = v; }
+  }
+  return prm;
+}
+// Étalonnage : corrige les pourcentages (trop sûrs ou pas assez) par une régression logistique sur la sortie du modèle.
+function plattFit(L) {
+  let a = 1, b = 0;
+  for (let it = 0; it < 300; it++) {
+    let ga = 0, gb = 0;
+    for (const x of L) { const z = logit(x.p), e = sigm(a * z + b) - x.win; ga += e * z; gb += e; }
+    a -= 0.5 * ga / L.length; b -= 0.5 * gb / L.length;
+  }
+  return (p) => sigm(a * logit(p) + b);
 }
 
 // ---------- Modèle du total de points (Over/Under) ----------
@@ -192,30 +251,29 @@ function predictTot(M, h, a) {
 
 function runModel() {
   const games = Object.entries(db.games).map(([id, g]) => ({ id, ...g })).sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
-  const elo = {}, cnt = {}, last = {}, log = [], pred = {}; let season = null;
-  for (const g of games) {
-    const sn = seasonOf(g.t);
-    if (season !== null && sn !== season) {
-      for (const k in elo) elo[k] = 1505 + (elo[k] - 1505) * 0.75;
-      for (const k in last) delete last[k];
-    }
-    season = sn;
-    const eh = elo[g.h] ?? 1500, ea = elo[g.a] ?? 1500, day = dayKey(g.t);
-    const diff = eh - ea + HFA + fatigue(g.h, g.a, day, last);
-    const p = 1 / (1 + Math.pow(10, -diff / 400));
-    const win = g.hs > g.as ? 1 : 0, mov = Math.abs(g.hs - g.as);
-    pred[g.id] = { p, m: diff / PTS, cold: (cnt[g.h] || 0) < 15 || (cnt[g.a] || 0) < 15 };
-    if ((cnt[g.h] || 0) >= 15 && (cnt[g.a] || 0) >= 15) log.push({ t: g.t, p, win });
-    const dW = win ? diff : -diff;
-    const mult = Math.pow(mov + 3, 0.8) / (7.5 + 0.006 * dW);
-    const delta = K * mult * (win - p);
-    elo[g.h] = eh + delta; elo[g.a] = ea - delta;
-    cnt[g.h] = (cnt[g.h] || 0) + 1; cnt[g.a] = (cnt[g.a] || 0) + 1;
-    last[g.h] = day; last[g.a] = day;
+  const cut = games.length > 1200 ? games.length - HOLD : 0;
+  let prm = { ...EBASE }, evalPrm = prm, tune = null, calib = null, cal = (p) => p;
+  if (cut) {   // 1) on règle sur le passé, 2) on vérifie sur les derniers matchs que le modèle n'a pas vus
+    const tuned = tuneElo(games.slice(0, cut));
+    const hb = runElo(games, EBASE, false).log.filter((x) => x.i >= cut), ht = runElo(games, tuned, false).log.filter((x) => x.i >= cut);
+    const used = brierOf(ht) < brierOf(hb);
+    tune = { n: hb.length, bBase: brierOf(hb), bTuned: brierOf(ht), aBase: accOf(hb), aTuned: accOf(ht), used };
+    if (used) { evalPrm = tuned; prm = tuneElo(games); }
   }
+  const R = runElo(games, prm, true);
+  if (cut) {
+    const E = runElo(games, evalPrm, false).log;
+    const tr = E.filter((x) => x.i < cut), te = E.filter((x) => x.i >= cut);
+    const f = plattFit(tr), mapped = te.map((x) => ({ ...x, p: f(x.p) }));
+    const used = brierOf(mapped) < brierOf(te);
+    calib = { bRaw: brierOf(te), bCal: brierOf(mapped), used };
+    if (used) cal = plattFit(R.log);
+  }
+  const log = R.log.map((x) => ({ ...x, p: cal(x.p) }));
+  for (const id in R.pred) R.pred[id].p = cal(R.pred[id].p);
   const totPrm = fitTotals(games);
   const tot = runTotals(games, totPrm.lam, totPrm.k, true);
-  return { elo, cnt, last, log, pred, tot, totPrm };
+  return { elo: R.elo, cnt: R.cnt, st: R.st, prm, cal, tune, calib, log, pred: R.pred, tot, totPrm };
 }
 function parseSpread(details, hAb, aAb) {           // ex. "BOS -5.5" -> marge attendue du domicile selon la ligne
   if (!details) return null;
@@ -308,9 +366,8 @@ function oddsBlock(g, M, ctx) {
 // ---------- Affichage : onglet À venir ----------
 function upCard(g, M, picks) {
   const H = T(g.h), A = T(g.a), day = dayKey(g.t);
-  const eh = M.elo[g.h] ?? 1500, ea = M.elo[g.a] ?? 1500;
-  const diff = eh - ea + HFA + fatigue(g.h, g.a, day, M.last);
-  const ph = 1 / (1 + Math.pow(10, -diff / 400)), pa = 1 - ph, margin = diff / PTS;
+  const diff = eloDiff(M, g.h, g.a, day);
+  const ph = M.cal(1 / (1 + Math.pow(10, -diff / 400))), pa = 1 - ph, margin = diff / PTS;
   const time = new Date(g.t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
   const spread = g.odds ? parseSpread(g.odds.details, H.ab, A.ab) : null;
   let tag = '', tagCls = '', l2 = 'Pas de cote disponible';
@@ -388,6 +445,21 @@ function renderModel(M) {
     $('#totstats').innerHTML = tiles.map(tile).join('');
   } else $('#totstats').innerHTML = '<div class="empty">Pas encore assez de matchs.</div>';
 
+  const tl = [];
+  if (M.tune) {
+    tl.push([fr(M.tune.bTuned, 3) + ' contre ' + fr(M.tune.bBase, 3), `Score de Brier avec le réglage auto, contre le réglage de départ, sur les ${M.tune.n} derniers matchs (plus bas = mieux)`]);
+    tl.push([fr(M.tune.aTuned * 100) + ' % contre ' + fr(M.tune.aBase * 100) + ' %', M.tune.used ? 'Victoires bien prédites, même test : le réglage auto est gardé' : 'Victoires bien prédites, même test : le réglage auto ne fait pas mieux, on garde celui de départ']);
+  }
+  if (M.calib) tl.push([fr(M.calib.bCal, 3) + ' contre ' + fr(M.calib.bRaw, 3), M.calib.used ? 'Brier avec et sans étalonnage des pourcentages : étalonnage gardé' : 'Brier avec et sans étalonnage : ça n\'aide pas, on ne l\'applique pas']);
+  $('#tune').innerHTML = tl.length ? tl.map(tile).join('') : '<div class="empty">Pas encore assez de matchs pour régler le modèle.</div>';
+  const bins = [[0.5, 0.6], [0.6, 0.7], [0.7, 0.8], [0.8, 1.01]];
+  const rows = bins.map(([lo, hi]) => {
+    const B = L.filter((x) => Math.max(x.p, 1 - x.p) >= lo && Math.max(x.p, 1 - x.p) < hi);
+    if (!B.length) return '';
+    const pa = B.reduce((s, x) => s + Math.max(x.p, 1 - x.p), 0) / B.length, ok = accOf(B);
+    return `<tr><td>${Math.round(lo * 100)}–${hi > 1 ? 100 : Math.round(hi * 100)} %</td><td class="n">${B.length}</td><td class="n">${fr(pa * 100, 0)} %</td><td class="n">${fr(ok * 100, 0)} %</td></tr>`;
+  }).join('');
+  $('#calib').innerHTML = rows ? '<tr><th>Confiance</th><th class="n">Matchs</th><th class="n">Annoncé</th><th class="n">Réel</th></tr>' + rows : '';
   const teams = Object.keys(M.elo).sort((a, b) => M.elo[b] - M.elo[a]);
   $('#rank').innerHTML = '<tr><th>#</th><th>Équipe</th><th class="n">Elo</th></tr>'
     + teams.map((id, i) => `<tr><td>${i + 1}</td><td>${esc(T(id).n)}</td><td class="n">${Math.round(M.elo[id])}</td></tr>`).join('');
@@ -395,7 +467,7 @@ function renderModel(M) {
   $('#oddsInfo').textContent = !getKey() ? 'Pas de clé : les cotes Betclic ne sont pas chargées.'
     : db.odds ? `Cotes chargées à ${new Date(db.odds.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${db.odds.items.length} matchs${db.odds.left !== null && db.odds.left !== undefined ? ' · ' + db.odds.left + ' crédits restants ce mois-ci' : ''}`
     : 'Clé enregistrée, cotes pas encore chargées.';
-  $('#modelnote').textContent = `Modèle v2.1 : Elo (avantage du terrain, marge, fatigue) pour le vainqueur ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
+  $('#modelnote').textContent = `Modèle v2.2 : Elo pour le vainqueur (réglage auto : K ${M.prm.K}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
 }
 
 // ---------- Affichage : onglet Joués ----------
