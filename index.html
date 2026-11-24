@@ -17,7 +17,7 @@
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  padding:max(12px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) calc(100px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));}
+  padding:max(12px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) calc(140px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));}
 [hidden]{display:none!important}
 .wrap{max-width:640px;margin:0 auto}
 button,select{font:inherit}
@@ -92,7 +92,7 @@ td.n,th.n{text-align:right}
 
 /* barre du bas */
 nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top:1px solid var(--line);
-  padding:8px max(12px,env(safe-area-inset-right)) max(14px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
+  padding:8px max(12px,env(safe-area-inset-right)) max(50px,calc(14px + env(safe-area-inset-bottom))) max(12px,env(safe-area-inset-left))}
 .tabs-in{display:flex;gap:4px;max-width:640px;margin:0 auto}
 .tab{flex:1;min-height:56px;border:0;background:transparent;color:var(--mut);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:12px;font-weight:600;padding:0}
 .tab .chip{display:flex;align-items:center;justify-content:center;width:52px;height:30px;border-radius:15px}
