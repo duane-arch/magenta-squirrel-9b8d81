@@ -10,98 +10,141 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <style>
 :root{
-  --bg:#0e1116; --panel:#171b22; --line:#262c36; --fg:#e8ebf0; --mut:#8b94a3;
+  --bg:#0e1116; --nav:#11151b; --panel:#171b22; --line:#262c36; --fg:#e8ebf0; --mut:#8b94a3;
   --acc:#f2a33a; --away:#4c8dff; --home:#f2a33a; --ok:#3ecf8e; --bad:#ff6b6b;
   color-scheme:dark;
 }
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  padding:max(12px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left));}
-main{max-width:640px;margin:0 auto}
-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px}
-h1{font-size:20px;margin:0;letter-spacing:.2px}
-h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:22px 0 8px;font-weight:600}
-button{background:var(--acc);color:#1a1205;border:0;border-radius:10px;padding:9px 14px;font:inherit;font-weight:600}
-button:disabled{opacity:.5}
-button:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
-#status{color:var(--mut);font-size:13px;min-height:1.4em}
+  padding:max(12px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) calc(100px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));}
+[hidden]{display:none!important}
+.wrap{max-width:640px;margin:0 auto}
+button,select{font:inherit}
+button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0 14px}
+.top>div{min-width:0}
+h1{font-size:22px;margin:0;font-weight:700}
+#status{color:var(--mut);font-size:13px;min-height:1.4em;margin-top:2px}
 #status.err{color:var(--bad)}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px}
-.meta{color:var(--mut);font-size:12px;display:flex;justify-content:space-between;gap:8px}
+.icon{width:44px;height:44px;flex:none;border:0;border-radius:10px;background:var(--acc);color:#1a1205;display:flex;align-items:center;justify-content:center}
+.icon[disabled]{opacity:.6}
+.icon.busy svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.icon.busy svg{animation:none}}
+
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:22px 0 8px;font-weight:600}
+.day{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);font-weight:600;margin:16px 0 8px}
+.day:first-child{margin-top:4px}
+.dayh{display:flex;justify-content:space-between;gap:8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);font-weight:600;margin:16px 0 6px}
+.empty{color:var(--mut);padding:14px 0}
+.note{color:var(--mut);font-size:12px;margin-top:18px}
+.scroll{overflow-x:auto}
+.pick{color:var(--ok)}
+.ok{color:var(--ok);font-weight:600}
+.ko{color:var(--bad);font-weight:600}
+
+/* matchs à venir */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px;display:flex;flex-direction:column;gap:8px}
+.meta{display:flex;justify-content:space-between;gap:8px;color:var(--mut);font-size:12px}
 .live{color:var(--ok);font-weight:600}
-.teams{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:6px 0 8px;font-weight:600}
+.teams{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-weight:600;font-size:15px}
 .teams span{min-width:0}
 .teams .at{color:var(--mut);font-weight:400}
+.teams span:last-child{text-align:right}
 .bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--line)}
 .bar i{display:block;height:100%}
 .bar .a{background:var(--away)}
 .bar .h{background:var(--home)}
-.probs{display:flex;justify-content:space-between;margin-top:5px;font-variant-numeric:tabular-nums}
-.line{margin-top:8px;font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums}
+.probs{display:flex;justify-content:space-between;font-weight:600;font-size:14px;font-variant-numeric:tabular-nums}
+.line{font-size:12.5px;color:var(--mut);line-height:1.45;font-variant-numeric:tabular-nums}
 .line b{color:var(--fg)}
-.pick{color:var(--ok)}
+.line b.pick{color:var(--ok)}
+.card .line+.line{margin-top:-4px}
+
+/* matchs joués */
+.filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:12px}
+select{appearance:none;-webkit-appearance:none;min-width:0;width:100%;min-height:44px;background:var(--panel) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%238b94a3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>") no-repeat right 8px center;color:var(--fg);border:1px solid var(--line);border-radius:22px;padding:0 28px 0 12px;font-size:14px;text-overflow:ellipsis}
+.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.stat b{display:block;font-size:22px;font-variant-numeric:tabular-nums}
+.stat span{color:var(--mut);font-size:12.5px;line-height:1.4;display:block;margin-top:2px}
+#h2h{margin-bottom:6px}
+#h2h:empty{display:none}
+.grp{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:0 14px}
+details.game+details.game{border-top:1px solid var(--line)}
+details.game summary{display:flex;align-items:center;gap:12px;padding:11px 0;cursor:pointer;list-style:none}
+details.game summary::-webkit-details-marker{display:none}
+.sc{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;font-size:16px;font-variant-numeric:tabular-nums}
+.sc div{display:flex;justify-content:space-between;color:var(--mut)}
+.sc div.w{color:var(--fg);font-weight:700}
+.sep{width:1px;align-self:stretch;background:var(--line)}
+.rt{width:118px;display:flex;flex-direction:column;gap:2px;font-size:12.5px;color:var(--mut)}
+.det{padding:0 0 12px;display:flex;flex-direction:column;gap:4px}
+.q{margin-top:6px}
+.more{margin-top:12px;width:100%;min-height:44px;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;font-weight:600}
+
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
 th{color:var(--mut);font-weight:500;font-size:12px}
 td.n,th.n{text-align:right}
-.scroll{overflow-x:auto}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
-.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
-.stat b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
-.stat span{color:var(--mut);font-size:12px}
-.note{color:var(--mut);font-size:12px;margin-top:18px}
-details.sec summary{cursor:pointer;color:var(--mut);font-size:13px;text-transform:uppercase;letter-spacing:.08em;margin:22px 0 8px;font-weight:600}
-.empty{color:var(--mut);padding:14px 0}
-.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:10px}
-.filters label{display:flex;flex-direction:column;gap:3px;color:var(--mut);font-size:12px;min-width:0}
-select{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:9px 8px;font:inherit;width:100%;min-width:0}
-#h2h{margin-bottom:10px}
-#h2h:empty{display:none}
-details.game{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin-bottom:8px}
-details.game summary{cursor:pointer;list-style:none}
-details.game summary::-webkit-details-marker{display:none}
-.score{display:grid;grid-template-columns:1fr auto auto auto 1fr;gap:10px;align-items:baseline;margin:5px 0;font-variant-numeric:tabular-nums;font-size:17px}
-.score span:last-child{text-align:right}
-.score .w{font-weight:700}
-.ok{color:var(--ok)}
-.ko{color:var(--bad)}
-.q{margin-top:8px}
-#more{margin-top:6px;width:100%;background:var(--panel);color:var(--fg);border:1px solid var(--line)}
+
+/* barre du bas */
+nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top:1px solid var(--line);
+  padding:8px max(12px,env(safe-area-inset-right)) max(14px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
+.tabs-in{display:flex;gap:4px;max-width:640px;margin:0 auto}
+.tab{flex:1;min-height:56px;border:0;background:transparent;color:var(--mut);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:12px;font-weight:600;padding:0}
+.tab .chip{display:flex;align-items:center;justify-content:center;width:52px;height:30px;border-radius:15px}
+.tab.on{color:var(--acc)}
+.tab.on .chip{background:var(--line)}
 </style>
 </head>
 <body>
-<main>
-  <header>
-    <h1>NBA Predict</h1>
-    <button id="refresh" type="button">Actualiser</button>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1 id="heading">Matchs à venir</h1>
+      <div id="status" role="status">Chargement…</div>
+    </div>
+    <button id="refresh" class="icon" type="button" aria-label="Actualiser les données"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
   </header>
-  <div id="status" role="status">Chargement…</div>
 
-  <h2>Prochains matchs</h2>
-  <div id="games"><div class="empty">Aucune donnée pour l'instant.</div></div>
+  <section id="tab-played" hidden>
+    <div class="filters">
+      <select id="fTeam" aria-label="Équipe"></select>
+      <select id="fOpp" aria-label="Adversaire"></select>
+      <select id="fSeason" aria-label="Saison"></select>
+    </div>
+    <div id="h2h" class="stats"></div>
+    <div id="played"></div>
+    <button id="more" class="more" type="button" hidden>Voir plus de matchs</button>
+    <p class="note">Touche un match pour voir le détail : quart-temps, total de points et ligne. Choisis une équipe puis un adversaire pour un face-à-face.</p>
+  </section>
 
-  <h2>Fiabilité du modèle</h2>
-  <div id="stats" class="stats"></div>
+  <section id="tab-up">
+    <div id="games"><div class="empty">Aucune donnée pour l'instant.</div></div>
+    <p class="note">Le total prévu vient du modèle pour chaque match. Le verdict Over/Under apparaît dès qu'ESPN publie sa ligne, en général peu avant le match.</p>
+  </section>
 
-  <h2>Matchs joués</h2>
-  <div class="filters">
-    <label for="fTeam">Équipe<select id="fTeam"></select></label>
-    <label for="fOpp">Adversaire<select id="fOpp"></select></label>
-    <label for="fSeason">Saison<select id="fSeason"></select></label>
-  </div>
-  <div id="h2h" class="stats"></div>
-  <div id="played"></div>
-  <button id="more" type="button" hidden>Voir plus de matchs</button>
-  <p class="note">Touche un match pour voir les points par quart-temps. Choisis une équipe puis un adversaire pour un face-à-face.</p>
-
-  <details class="sec">
-    <summary>Classement Elo</summary>
+  <section id="tab-model" hidden>
+    <h2>Fiabilité du modèle</h2>
+    <div id="stats" class="stats"></div>
+    <h2>Total de points (Over/Under)</h2>
+    <div id="totstats" class="stats"></div>
+    <h2>Classement Elo</h2>
     <div class="scroll"><table id="rank"></table></div>
-  </details>
+    <p class="note" id="modelnote"></p>
+  </section>
+</div>
 
-  <p class="note">Modèle v1 : Elo avec avantage du terrain, marge de victoire et fatigue (match la veille). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre. <span id="ver">v1.3</span></p>
-</main>
+<nav class="tabs" aria-label="Navigation">
+  <div class="tabs-in">
+    <button type="button" class="tab" data-tab="played" aria-pressed="false"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg></span><span>Joués</span></button>
+    <button type="button" class="tab" data-tab="up" aria-pressed="true"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M8 3v4M16 3v4M3.5 10h17"/></svg></span><span>À venir</span></button>
+    <button type="button" class="tab" data-tab="model" aria-pressed="false"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-6"/></svg></span><span>Modèle</span></button>
+  </div>
+</nav>
 <script src="app.js"></script>
 </body>
 </html>
