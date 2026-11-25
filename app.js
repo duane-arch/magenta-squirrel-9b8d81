@@ -118,7 +118,9 @@ async function refresh(manual) {
     try { await fetchOdds(manual === true ? 20 * 60e3 : 3 * 3600e3); } catch (e) { oddsMsg = ` · cotes indisponibles (${e.message === 'Failed to fetch' ? 'réseau ou accès bloqué' : e.message})`; }
     render();
     const hh = new Date(db.updatedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-    setStatus(`À jour · ${hh}` + (errors.length ? ` · ${errors.length} jour(s) en échec` : '') + oddsMsg, errors.length > 0 || !!oddsMsg);
+    const base = `À jour · ${hh}` + (errors.length ? ` · ${errors.length} jour(s) en échec` : '') + oddsMsg, flag = errors.length > 0 || !!oddsMsg;
+    setStatus(base, flag);
+    await syncPlayers(base, flag);
   } catch (e) {
     save();
     setStatus(`Échec de la mise à jour (${e.message}). Données en cache affichées.`, true);
@@ -131,8 +133,8 @@ const dayKey = (iso) => new Date(Date.parse(iso) - 6 * 3600e3).toISOString().sli
 const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 864e5);
 const seasonOf = (iso) => { const d = new Date(iso); return d.getUTCMonth() >= 7 ? d.getUTCFullYear() : d.getUTCFullYear() - 1; };
 // Réglages de départ de l'Elo ; l'appli les ajuste seule sur tes données (voir tuneElo).
-const EBASE = { K: 20, HFA: 100, B2B: 40, R34: 0, REG: 0.25 };
-const ECAND = { K: [12, 16, 20, 24, 30], HFA: [60, 80, 100, 120], B2B: [0, 20, 40, 60], R34: [0, 15, 30], REG: [0.1, 0.25, 0.4] };
+const EBASE = { K: 20, HFA: 100, B2B: 40, R34: 0, REG: 0.25, ABS: 0 };
+const ECAND = { K: [12, 16, 20, 24, 30], HFA: [60, 80, 100, 120], B2B: [0, 20, 40, 60], R34: [0, 15, 30], REG: [0.1, 0.25, 0.4], ABS: [0, 2, 4, 6, 8] };
 const HOLD = 400;                                  // matchs les plus récents gardés de côté pour vérifier que le réglage aide vraiment
 function fatigue(h, a, day, st, prm) {             // pénalité de repos : match la veille, 3e match en 4 soirs
   const f = (t) => {
@@ -144,7 +146,100 @@ function fatigue(h, a, day, st, prm) {             // pénalité de repos : matc
   };
   return f(a) - f(h);
 }
-const eloDiff = (M, h, a, day) => (M.elo[h] ?? 1500) - (M.elo[a] ?? 1500) + M.prm.HFA + fatigue(h, a, day, M.st, M.prm);
+// ---------- Joueurs : détail des matchs (ESPN summary) et blessures ----------
+const SUMMARY = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=';
+const INJ_URL = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries';
+const BOX_LS = 'nbaPredict.box', BOX_BATCH = 700;
+const REPL = 12, ROT_MIN = 18, ROT_WIN = 20;                    // production d'un remplaçant ; minutes et fenêtre pour être « dans la rotation »
+const STW = { out: 1, doubtful: 0.75, questionable: 0.4, 'day-to-day': 0.3 };   // part de chance d'être absent selon le statut ESPN
+let boxDb = (() => { try { const v = JSON.parse(localStorage.getItem(BOX_LS)); if (v && v.games) return v; } catch (e) {} return { games: {} }; })();
+const saveBox = () => { try { localStorage.setItem(BOX_LS, JSON.stringify(boxDb)); } catch (e) {} };
+async function fetchBox(id) {
+  const r = await fetch(SUMMARY + id);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const j = await r.json(), out = {};
+  for (const t of (j.boxscore && j.boxscore.players) || []) {
+    const st = (t.statistics || [])[0]; if (!st || !t.team) continue;
+    const keys = st.keys || st.names || [], ix = (re) => keys.findIndex((k) => re.test(String(k)));
+    const iMin = ix(/^min/i), cols = { pts: ix(/^points$/i), reb: ix(/^rebounds$/i), ast: ix(/^assists$/i), stl: ix(/^steals$/i), blk: ix(/^blocks$/i), tov: ix(/^turnovers$/i) };
+    if (iMin < 0) continue;
+    const rows = [];
+    for (const a of st.athletes || []) {
+      if (a.didNotPlay || !a.stats || !a.stats.length || !a.athlete) continue;
+      const v = (i) => { const x = i >= 0 ? parseFloat(a.stats[i]) : NaN; return Number.isFinite(x) ? x : 0; };
+      const min = v(iMin); if (min <= 0) continue;
+      rows.push([String(a.athlete.id), Math.round(min), Math.round(v(cols.pts) + v(cols.reb) + v(cols.ast) + v(cols.stl) + v(cols.blk) - v(cols.tov))]);
+    }
+    out[String(t.team.id)] = rows;
+  }
+  return out;
+}
+async function fetchInjuries() {
+  const r = await fetch(INJ_URL);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const j = await r.json(), teams = {}; let n = 0;
+  for (const t of j.injuries || []) {
+    const list = [];
+    for (const it of t.injuries || []) {
+      const at = it.athlete; if (!at || !at.id) continue;
+      list.push({ id: String(at.id), name: at.displayName || at.fullName || 'Joueur', status: String(it.status || (it.type && it.type.description) || '').toLowerCase() });
+    }
+    teams[String(t.id)] = list; n += list.length;
+  }
+  db.inj = { at: new Date().toISOString(), teams, n };
+  save();
+}
+// Pour chaque match joué : valeur des joueurs « de rotation » absents (production moyenne au-dessus d'un remplaçant).
+function playerPass(games) {
+  const pl = {}, tg = {};
+  for (const g of games) {
+    const bx = boxDb.games[g.id];
+    if (!bx || !bx[g.h] || !bx[g.a] || bx[g.h].length < 5 || bx[g.a].length < 5) continue;
+    for (const tid of [g.h, g.a]) {
+      const rows = bx[tid], played = new Set(rows.map((r) => r[0])), P = pl[tid] || (pl[tid] = {}), n = tg[tid] || 0;
+      let x = 0;
+      for (const pid in P) { const q = P[pid]; if (!played.has(pid) && q.c >= 3 && q.m >= ROT_MIN && n - q.last <= ROT_WIN) x += Math.max(0, q.p - REPL); }
+      if (tid === g.h) g.xh = Math.min(x, 90); else g.xa = Math.min(x, 90);
+      for (const r of rows) {
+        const q = P[r[0]];
+        if (!q) P[r[0]] = { m: r[1], p: r[2], c: 1, last: n };
+        else { q.m = 0.85 * q.m + 0.15 * r[1]; q.p = 0.85 * q.p + 0.15 * r[2]; q.c++; q.last = n; }
+      }
+      tg[tid] = n + 1;
+    }
+  }
+  return { pl, tg };
+}
+// Absents annoncés (blessures ESPN) d'une équipe pour un match à venir.
+function missX(M, tid) {
+  const inj = (db.inj && db.inj.teams[tid]) || [], P = M.pl[tid] || {}, n = M.tg[tid] || 0, list = []; let x = 0;
+  for (const it of inj) {
+    const w = STW[it.status]; if (!w) continue;
+    const q = P[it.id]; if (!q || q.c < 3 || q.m < ROT_MIN || n - q.last > ROT_WIN) continue;
+    const v = Math.max(0, q.p - REPL); if (v <= 0) continue;
+    x += w * v; list.push({ name: it.name, status: it.status, v });
+  }
+  return { x: Math.min(x, 90), list };
+}
+async function syncPlayers(base, flag) {
+  let changed = false, msg = '';
+  try { await fetchInjuries(); changed = true; } catch (e) { msg += ` · blessures indisponibles (${e.message === 'Failed to fetch' ? 'réseau' : e.message})`; }
+  const cur = seasonOf(new Date().toISOString());
+  const todo = Object.entries(db.games).filter(([id, g]) => seasonOf(g.t) >= cur - 1 && !boxDb.games[id]).sort((x, y) => (x[1].t < y[1].t ? 1 : -1)).slice(0, BOX_BATCH);
+  let n = 0, bad = 0;
+  await pool(todo, 6, async ([id]) => {
+    try { const o = await fetchBox(id); if (Object.keys(o).length === 2) boxDb.games[id] = o; else bad++; changed = true; } catch (e) { bad++; }
+    n++;
+    if (n % 100 === 0) saveBox();
+    if (n % 10 === 0 || n === todo.length) setStatus(`Détails des joueurs… (${n}/${todo.length})`);
+  });
+  if (todo.length) saveBox();
+  if (todo.length && bad === todo.length) msg += ' · détails des joueurs indisponibles (format ou accès)';
+  if (changed) render();
+  setStatus(base + msg, flag || !!msg);
+}
+
+const eloDiff = (M, h, a, day) => (M.elo[h] ?? 1500) - (M.elo[a] ?? 1500) + M.prm.HFA + fatigue(h, a, day, M.st, M.prm) + M.prm.ABS * (missX(M, a).x - missX(M, h).x);
 const sigm = (x) => 1 / (1 + Math.exp(-x));
 const logit = (p) => Math.log(Math.min(0.999, Math.max(0.001, p)) / (1 - Math.min(0.999, Math.max(0.001, p))));
 function runElo(games, prm, keep) {
@@ -157,7 +252,7 @@ function runElo(games, prm, keep) {
     }
     season = sn;
     const eh = elo[g.h] ?? 1500, ea = elo[g.a] ?? 1500, day = dayKey(g.t);
-    const diff = eh - ea + prm.HFA + fatigue(g.h, g.a, day, st, prm);
+    const diff = eh - ea + prm.HFA + fatigue(g.h, g.a, day, st, prm) + prm.ABS * ((g.xa || 0) - (g.xh || 0));
     const p = 1 / (1 + Math.pow(10, -diff / 400));
     const win = g.hs > g.as ? 1 : 0, mov = Math.abs(g.hs - g.as);
     const warm = (cnt[g.h] || 0) >= 15 && (cnt[g.a] || 0) >= 15;
@@ -251,6 +346,7 @@ function predictTot(M, h, a) {
 
 function runModel() {
   const games = Object.entries(db.games).map(([id, g]) => ({ id, ...g })).sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
+  const PP = playerPass(games), nBox = games.filter((g) => g.xh !== undefined).length;
   const cut = games.length > 1200 ? games.length - HOLD : 0;
   let prm = { ...EBASE }, evalPrm = prm, tune = null, calib = null, cal = (p) => p;
   if (cut) {   // 1) on règle sur le passé, 2) on vérifie sur les derniers matchs que le modèle n'a pas vus
@@ -273,7 +369,12 @@ function runModel() {
   for (const id in R.pred) R.pred[id].p = cal(R.pred[id].p);
   const totPrm = fitTotals(games);
   const tot = runTotals(games, totPrm.lam, totPrm.k, true);
-  return { elo: R.elo, cnt: R.cnt, st: R.st, prm, cal, tune, calib, log, pred: R.pred, tot, totPrm };
+  let absT = null;
+  if (cut && prm.ABS > 0) {
+    const w = brierOf(runElo(games, prm, false).log.filter((x) => x.i >= cut)), w0 = brierOf(runElo(games, { ...prm, ABS: 0 }, false).log.filter((x) => x.i >= cut));
+    absT = { w, w0 };
+  }
+  return { elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, nBox, absT, prm, cal, tune, calib, log, pred: R.pred, tot, totPrm };
 }
 function parseSpread(details, hAb, aAb) {           // ex. "BOS -5.5" -> marge attendue du domicile selon la ligne
   if (!details) return null;
@@ -382,6 +483,11 @@ function upCard(g, M, picks) {
     const d = pt.tot - ou;
     l3 += ` · O/U ESPN ${fr(ou)} → <b class="${Math.abs(d) >= OU_EDGE ? 'pick' : ''}">${d >= 0 ? 'Over' : 'Under'} (${signed(d, 1)})</b>`;
   } else l3 += ' · pas de ligne O/U pour l\'instant';
+  const mh = missX(M, g.h), ma = missX(M, g.a);
+  const abTxt = (m, ab) => m.list.length ? `${esc(ab)} : ${m.list.map((p) => `${esc(p.name)} (${esc(p.status)})`).join(', ')}` : '';
+  const ab = [abTxt(ma, A.ab), abTxt(mh, H.ab)].filter(Boolean);
+  const abEff = M.prm.ABS * (ma.x - mh.x) / PTS;
+  const abLine = ab.length ? `<div class="line">Absents importants · ${ab.join(' · ')}${M.prm.ABS > 0 ? ` → <b>${abEff >= 0 ? esc(H.ab) : esc(A.ab)} ${signed(Math.abs(abEff), 1)} pts</b>` : ''}</div>` : '';
   const bt = oddsBlock(g, M, { ph, pa, margin, tot: pt.tot });
   if (picks) for (const b of bt.bets) picks.push({ ...b, g, time });
   return `<div class="card">
@@ -391,7 +497,7 @@ function upCard(g, M, picks) {
     <div class="probs"><span>${esc(A.ab)} ${(pa * 100).toFixed(0)}%</span><span>${esc(H.ab)} ${(ph * 100).toFixed(0)}%</span></div>
     <div class="line">Marge modèle : <b>${esc(winTxt(margin, H, A))}</b></div>
     <div class="line">${l2}</div>
-    <div class="line">${l3}</div>${bt.html}</div>`;
+    <div class="line">${l3}</div>${abLine}${bt.html}</div>`;
 }
 function renderUp(M) {
   const box = $('#games'), now = Date.now();
@@ -452,6 +558,11 @@ function renderModel(M) {
   }
   if (M.calib) tl.push([fr(M.calib.bCal, 3) + ' contre ' + fr(M.calib.bRaw, 3), M.calib.used ? 'Brier avec et sans étalonnage des pourcentages : étalonnage gardé' : 'Brier avec et sans étalonnage : ça n\'aide pas, on ne l\'applique pas']);
   $('#tune').innerHTML = tl.length ? tl.map(tile).join('') : '<div class="empty">Pas encore assez de matchs pour régler le modèle.</div>';
+  const pt = [[`${M.nBox}`, 'Matchs dont on a le détail des joueurs (saison en cours et précédente)']];
+  pt.push([db.inj ? `${db.inj.n}` : '–', db.inj ? `Joueurs blessés annoncés par ESPN (chargé à ${new Date(db.inj.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })})` : 'Blessures pas encore chargées']);
+  if (M.absT) pt.push([fr(M.absT.w, 3) + ' contre ' + fr(M.absT.w0, 3), `Brier avec et sans les absences, sur les ${M.tune ? M.tune.n : 400} derniers matchs (poids réglé : ${M.prm.ABS})`]);
+  else pt.push([M.prm.ABS ? String(M.prm.ABS) : '0', M.nBox < 300 ? "Poids des absences : pas encore assez de matchs détaillés pour le régler" : "Poids des absences réglé à 0 : ça n'améliore pas la prévision sur tes données"]);
+  $('#players').innerHTML = pt.map(tile).join('');
   const bins = [[0.5, 0.6], [0.6, 0.7], [0.7, 0.8], [0.8, 1.01]];
   const rows = bins.map(([lo, hi]) => {
     const B = L.filter((x) => Math.max(x.p, 1 - x.p) >= lo && Math.max(x.p, 1 - x.p) < hi);
@@ -467,7 +578,7 @@ function renderModel(M) {
   $('#oddsInfo').textContent = !getKey() ? 'Pas de clé : les cotes Betclic ne sont pas chargées.'
     : db.odds ? `Cotes chargées à ${new Date(db.odds.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${db.odds.items.length} matchs${db.odds.left !== null && db.odds.left !== undefined ? ' · ' + db.odds.left + ' crédits restants ce mois-ci' : ''}`
     : 'Clé enregistrée, cotes pas encore chargées.';
-  $('#modelnote').textContent = `Modèle v2.2 : Elo pour le vainqueur (réglage auto : K ${M.prm.K}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
+  $('#modelnote').textContent = `Modèle v3.0 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
 }
 
 // ---------- Affichage : onglet Joués ----------
