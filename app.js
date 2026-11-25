@@ -360,6 +360,36 @@ function predictTot(M, h, a) {
   return { tot: ph + pa, ph, pa };
 }
 
+// ---------- Combinaison de signaux (Elo + attaque-défense + forme + repos) ----------
+const formVal = (mg, t) => { const x = mg[t]; return x && x.length >= 5 ? x.reduce((s, v) => s + v, 0) / x.length : 0; };   // marge moyenne sur les 10 derniers matchs
+const restOf = (lastD, t, day) => { const l = lastD[t]; if (!l) return 3; const n = dayDiff(day, l) - 1; return n > 10 ? 3 : Math.max(0, Math.min(4, n)); };
+function formPass(games) {
+  const mg = {}, lastD = {}; let season = null;
+  for (const g of games) {
+    const sn = seasonOf(g.t), day = dayKey(g.t);
+    if (season !== null && sn !== season) for (const k in mg) mg[k] = [];
+    season = sn;
+    g.fm = formVal(mg, g.h) - formVal(mg, g.a);
+    g.rd = restOf(lastD, g.h, day) - restOf(lastD, g.a, day);
+    for (const [t, m] of [[g.h, g.hs - g.as], [g.a, g.as - g.hs]]) { (mg[t] = mg[t] || []).push(m); if (mg[t].length > 10) mg[t].shift(); lastD[t] = day; }
+  }
+  return { mg, lastD };
+}
+const stkRow = (pRaw, mt, fm, rd) => [1, logit(pRaw), mt / 10, fm / 10, rd / 3];
+function logitFit(X, y) {
+  const w = [0, 1, 0, 0, 0];
+  for (let it = 0; it < 500; it++) {
+    const g = [0, 0, 0, 0, 0];
+    for (let r = 0; r < X.length; r++) {
+      let z = 0; for (let k = 0; k < 5; k++) z += w[k] * X[r][k];
+      const e = sigm(z) - y[r]; for (let k = 0; k < 5; k++) g[k] += e * X[r][k];
+    }
+    for (let k = 0; k < 5; k++) w[k] -= 0.6 * (g[k] / X.length + (k > 0 ? 0.001 * w[k] : 0));
+  }
+  return w;
+}
+const stkP = (w, row) => sigm(row.reduce((s, x, k) => s + w[k] * x, 0));
+
 function runModel() {
   const games = Object.entries(db.games).map(([id, g]) => ({ id, ...g })).sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
   const PP = playerPass(games), nBox = games.filter((g) => g.xh !== undefined).length;
@@ -381,16 +411,34 @@ function runModel() {
     calib = { bRaw: brierOf(te), bCal: brierOf(mapped), used };
     if (used) cal = plattFit(R.log);
   }
-  const log = R.log.map((x) => ({ ...x, p: cal(x.p) }));
-  for (const id in R.pred) R.pred[id].p = cal(R.pred[id].p);
   const totPrm = fitTotals(games);
   const tot = runTotals(games, totPrm.lam, totPrm.k, true);
+  const FP = formPass(games);
+  const rowOf = (i) => { const g = games[i], tp = tot.pred[g.id]; return stkRow(R.pred[g.id].p, tp ? tp.ph - tp.pa : 0, g.fm || 0, g.rd || 0); };
+  let stack = null, w = null;
+  if (cut) {   // la combinaison est apprise sur le passé, puis comparée à l'Elo étalonné seul sur les derniers matchs
+    const trI = R.log.filter((x) => x.i < cut), teI = R.log.filter((x) => x.i >= cut);
+    const wTr = logitFit(trI.map((x) => rowOf(x.i)), trI.map((x) => x.win)), f0 = plattFit(trI);
+    const S = teI.map((x) => ({ p: stkP(wTr, rowOf(x.i)), win: x.win })), C = teI.map((x) => ({ p: f0(x.p), win: x.win }));
+    stack = { bS: brierOf(S), bC: brierOf(C), aS: accOf(S), aC: accOf(C), used: brierOf(S) < brierOf(C) - 0.0015 };
+    if (stack.used) w = logitFit(R.log.map((x) => rowOf(x.i)), R.log.map((x) => x.win));
+  }
+  const pOf = (i) => (w ? stkP(w, rowOf(i)) : cal(R.pred[games[i].id].p));
+  const log = R.log.map((x) => ({ ...x, p: pOf(x.i) }));
+  games.forEach((g, i) => { R.pred[g.id].p = pOf(i); });
   let absT = null;
   if (cut && prm.ABS > 0) {
     const w = brierOf(runElo(games, prm, false).log.filter((x) => x.i >= cut)), w0 = brierOf(runElo(games, { ...prm, ABS: 0 }, false).log.filter((x) => x.i >= cut));
     absT = { w, w0 };
   }
-  return { elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, nBox, absT, prm, cal, tune, calib, log, pred: R.pred, tot, totPrm };
+  const M = { elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, fp: FP, nBox, absT, prm, cal, tune, calib, stack, wts: w, log, pred: R.pred, tot, totPrm };
+  M.winP = (h, a, day) => {   // probabilité que le domicile gagne un match à venir
+    const raw = 1 / (1 + Math.pow(10, -eloDiff(M, h, a, day) / 400));
+    if (!w) return cal(raw);
+    const pt = predictTot(M, h, a);
+    return stkP(w, stkRow(raw, pt.ph - pt.pa, formVal(FP.mg, h) - formVal(FP.mg, a), restOf(FP.lastD, h, day) - restOf(FP.lastD, a, day)));
+  };
+  return M;
 }
 function parseSpread(details, hAb, aAb) {           // ex. "BOS -5.5" -> marge attendue du domicile selon la ligne
   if (!details) return null;
@@ -484,7 +532,7 @@ function oddsBlock(g, M, ctx) {
 function upCard(g, M, picks) {
   const H = T(g.h), A = T(g.a), day = dayKey(g.t);
   const diff = eloDiff(M, g.h, g.a, day);
-  const ph = M.cal(1 / (1 + Math.pow(10, -diff / 400))), pa = 1 - ph, margin = diff / PTS;
+  const ph = M.winP(g.h, g.a, day), pa = 1 - ph, margin = diff / PTS;
   const time = new Date(g.t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
   const spread = g.odds ? parseSpread(g.odds.details, H.ab, A.ab) : null;
   let tag = '', tagCls = '', l2 = 'Pas de cote disponible';
@@ -572,6 +620,11 @@ function renderModel(M) {
     tl.push([fr(M.tune.bTuned, 3) + ' contre ' + fr(M.tune.bBase, 3), `Score de Brier avec le réglage auto, contre le réglage de départ, sur les ${M.tune.n} derniers matchs (plus bas = mieux)`]);
     tl.push([fr(M.tune.aTuned * 100) + ' % contre ' + fr(M.tune.aBase * 100) + ' %', M.tune.used ? 'Victoires bien prédites, même test : le réglage auto est gardé' : 'Victoires bien prédites, même test : le réglage auto ne fait pas mieux, on garde celui de départ']);
   }
+  if (M.stack) {
+    tl.push([fr(M.stack.bS, 3) + ' contre ' + fr(M.stack.bC, 3), M.stack.used ? "Brier avec la combinaison de signaux (Elo, attaque-défense, forme, repos) contre l'Elo seul : combinaison gardée" : "Brier avec la combinaison de signaux contre l'Elo seul : ça n'aide pas, on garde l'Elo seul"]);
+    tl.push([fr(M.stack.aS * 100) + ' % contre ' + fr(M.stack.aC * 100) + ' %', 'Victoires bien prédites, même test (combinaison contre Elo seul)']);
+    if (M.wts) tl.push([`Elo ${fr(M.wts[1], 2)}`, `Poids appris : attaque-défense ${fr(M.wts[2], 2)} · forme ${fr(M.wts[3], 2)} · repos ${fr(M.wts[4], 2)}`]);
+  }
   if (M.calib) tl.push([fr(M.calib.bCal, 3) + ' contre ' + fr(M.calib.bRaw, 3), M.calib.used ? 'Brier avec et sans étalonnage des pourcentages : étalonnage gardé' : 'Brier avec et sans étalonnage : ça n\'aide pas, on ne l\'applique pas']);
   $('#tune').innerHTML = tl.length ? tl.map(tile).join('') : '<div class="empty">Pas encore assez de matchs pour régler le modèle.</div>';
   const pt = [[`${M.nBox}`, 'Matchs dont on a le détail des joueurs (saison en cours et précédente)']];
@@ -595,7 +648,7 @@ function renderModel(M) {
   $('#oddsInfo').textContent = !getKey() ? 'Pas de clé : les cotes Betclic ne sont pas chargées.'
     : db.odds ? `Cotes chargées à ${new Date(db.odds.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${db.odds.items.length} matchs${db.odds.left !== null && db.odds.left !== undefined ? ' · ' + db.odds.left + ' crédits restants ce mois-ci' : ''}`
     : 'Clé enregistrée, cotes pas encore chargées.';
-  $('#modelnote').textContent = `Modèle v3.0 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
+  $('#modelnote').textContent = `Modèle v3.1 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
 }
 
 // ---------- Affichage : onglet Joués ----------
