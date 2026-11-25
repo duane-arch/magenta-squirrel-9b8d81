@@ -149,10 +149,11 @@ function fatigue(h, a, day, st, prm) {             // pénalité de repos : matc
 // ---------- Joueurs : détail des matchs (ESPN summary) et blessures ----------
 const SUMMARY = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=';
 const INJ_URL = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries';
-const BOX_LS = 'nbaPredict.box', BOX_BATCH = 700;
-const REPL = 12, ROT_MIN = 18, ROT_WIN = 20;                    // production d'un remplaçant ; minutes et fenêtre pour être « dans la rotation »
+const BOX_LS = 'nbaPredict.box2', BOX_BATCH = 900;
+const REPL = 5, ROT_MIN = 18, ROT_WIN = 20;                    // production d'un remplaçant ; minutes et fenêtre pour être « dans la rotation »
 const STW = { out: 1, doubtful: 0.75, questionable: 0.4, 'day-to-day': 0.3 };   // part de chance d'être absent selon le statut ESPN
 let boxDb = (() => { try { const v = JSON.parse(localStorage.getItem(BOX_LS)); if (v && v.games) return v; } catch (e) {} return { games: {} }; })();
+try { localStorage.removeItem('nbaPredict.box'); } catch (e) {}   // ancien format (production simple), remplacé par le Game Score
 const saveBox = () => { try { localStorage.setItem(BOX_LS, JSON.stringify(boxDb)); } catch (e) {} };
 async function fetchBox(id) {
   const r = await fetch(SUMMARY + id);
@@ -161,14 +162,20 @@ async function fetchBox(id) {
   for (const t of (j.boxscore && j.boxscore.players) || []) {
     const st = (t.statistics || [])[0]; if (!st || !t.team) continue;
     const keys = st.keys || st.names || [], ix = (re) => keys.findIndex((k) => re.test(String(k)));
-    const iMin = ix(/^min/i), cols = { pts: ix(/^points$/i), reb: ix(/^rebounds$/i), ast: ix(/^assists$/i), stl: ix(/^steals$/i), blk: ix(/^blocks$/i), tov: ix(/^turnovers$/i) };
-    if (iMin < 0) continue;
+    const iMin = ix(/^min/i); if (iMin < 0) continue;
+    const c = { pts: ix(/^points$/i), ast: ix(/^assists$/i), stl: ix(/^steals$/i), blk: ix(/^blocks$/i), tov: ix(/^turnovers$/i), orb: ix(/^offensiverebounds$/i), drb: ix(/^defensiverebounds$/i),
+      reb: ix(/^rebounds$/i), pf: ix(/^fouls$/i), pm: ix(/^plusminus$/i), fg: ix(/^fieldgoalsmade-fieldgoalsattempted$/i), ft: ix(/^freethrowsmade-freethrowsattempted$/i) };
     const rows = [];
     for (const a of st.athletes || []) {
       if (a.didNotPlay || !a.stats || !a.stats.length || !a.athlete) continue;
       const v = (i) => { const x = i >= 0 ? parseFloat(a.stats[i]) : NaN; return Number.isFinite(x) ? x : 0; };
+      const pair = (i) => { const m = i >= 0 ? String(a.stats[i]).match(/(\d+)\D+(\d+)/) : null; return m ? [+m[1], +m[2]] : [0, 0]; };
       const min = v(iMin); if (min <= 0) continue;
-      rows.push([String(a.athlete.id), Math.round(min), Math.round(v(cols.pts) + v(cols.reb) + v(cols.ast) + v(cols.stl) + v(cols.blk) - v(cols.tov))]);
+      const [fgm, fga] = pair(c.fg), [ftm, fta] = pair(c.ft);
+      const orb = c.orb >= 0 ? v(c.orb) : 0, drb = c.drb >= 0 ? v(c.drb) : Math.max(0, v(c.reb) - orb);
+      // Game Score de Hollinger : un chiffre de production par match (star ≈ 25, joueur de rotation ≈ 10, banc ≈ 3)
+      const gs = v(c.pts) + 0.4 * fgm - 0.7 * fga - 0.4 * (fta - ftm) + 0.7 * orb + 0.3 * drb + v(c.stl) + 0.7 * v(c.ast) + 0.7 * v(c.blk) - 0.4 * v(c.pf) - v(c.tov);
+      rows.push([String(a.athlete.id), Math.round(min), Math.round(gs * 10) / 10, Math.round(v(c.pm))]);
     }
     out[String(t.team.id)] = rows;
   }
@@ -208,9 +215,13 @@ function playerPass(games) {
     if (!bx || !bx[g.h] || !bx[g.a] || bx[g.h].length < 5 || bx[g.a].length < 5) continue;
     for (const tid of [g.h, g.a]) {
       const rows = bx[tid], played = new Set(rows.map((r) => r[0])), P = pl[tid] || (pl[tid] = {}), n = tg[tid] || 0;
-      let x = 0;
-      for (const pid in P) { const q = P[pid]; if (!played.has(pid) && q.c >= 3 && q.m >= ROT_MIN && n - q.last <= ROT_WIN) x += Math.max(0, q.p - REPL); }
-      if (tid === g.h) g.xh = Math.min(x, 90); else g.xa = Math.min(x, 90);
+      let x = 0, tal = 0;
+      for (const pid in P) {
+        const q = P[pid];
+        if (!(q.c >= 3 && q.m >= ROT_MIN && n - q.last <= ROT_WIN)) continue;     // joueur de rotation
+        if (played.has(pid)) tal += Math.max(0, q.p); else x += Math.max(0, q.p - REPL);
+      }
+      if (tid === g.h) { g.xh = Math.min(x, 90); g.th = tal; } else { g.xa = Math.min(x, 90); g.ta = tal; }
       for (const r of rows) {
         const q = P[r[0]];
         if (!q) P[r[0]] = { m: r[1], p: r[2], c: 1, last: n };
@@ -223,14 +234,17 @@ function playerPass(games) {
 }
 // Absents annoncés (blessures ESPN) d'une équipe pour un match à venir.
 function missX(M, tid) {
-  const inj = (db.inj && db.inj.teams[tid]) || [], P = M.pl[tid] || {}, n = M.tg[tid] || 0, list = []; let x = 0;
+  const inj = (db.inj && db.inj.teams[tid]) || [], P = M.pl[tid] || {}, n = M.tg[tid] || 0, list = []; let x = 0, tal = 0;
+  const rot = (q) => q && q.c >= 3 && q.m >= ROT_MIN && n - q.last <= ROT_WIN;
+  for (const pid in P) if (rot(P[pid])) tal += Math.max(0, P[pid].p);
   for (const it of inj) {
     const w = STW[it.status]; if (!w) continue;
-    const q = P[it.id]; if (!q || q.c < 3 || q.m < ROT_MIN || n - q.last > ROT_WIN) continue;
+    const q = P[it.id]; if (!rot(q)) continue;
+    tal -= w * Math.max(0, q.p);
     const v = Math.max(0, q.p - REPL); if (v <= 0) continue;
     x += w * v; list.push({ name: it.name, status: it.status, v });
   }
-  return { x: Math.min(x, 90), list };
+  return { x: Math.min(x, 90), list, tal };
 }
 async function syncPlayers(base, flag) {
   let changed = false, msg = '';
@@ -375,16 +389,16 @@ function formPass(games) {
   }
   return { mg, lastD };
 }
-const stkRow = (pRaw, mt, fm, rd) => [1, logit(pRaw), mt / 10, fm / 10, rd / 3];
+const stkRow = (pRaw, mt, fm, rd, td) => [1, logit(pRaw), mt / 10, fm / 10, rd / 3, td / 20];
 function logitFit(X, y) {
-  const w = [0, 1, 0, 0, 0];
+  const D = X[0].length, w = [0, 1, ...Array(D - 2).fill(0)];
   for (let it = 0; it < 500; it++) {
-    const g = [0, 0, 0, 0, 0];
+    const g = Array(D).fill(0);
     for (let r = 0; r < X.length; r++) {
-      let z = 0; for (let k = 0; k < 5; k++) z += w[k] * X[r][k];
-      const e = sigm(z) - y[r]; for (let k = 0; k < 5; k++) g[k] += e * X[r][k];
+      let z = 0; for (let k = 0; k < D; k++) z += w[k] * X[r][k];
+      const e = sigm(z) - y[r]; for (let k = 0; k < D; k++) g[k] += e * X[r][k];
     }
-    for (let k = 0; k < 5; k++) w[k] -= 0.6 * (g[k] / X.length + (k > 0 ? 0.001 * w[k] : 0));
+    for (let k = 0; k < D; k++) w[k] -= 0.6 * (g[k] / X.length + (k > 0 ? 0.001 * w[k] : 0));
   }
   return w;
 }
@@ -414,7 +428,7 @@ function runModel() {
   const totPrm = fitTotals(games);
   const tot = runTotals(games, totPrm.lam, totPrm.k, true);
   const FP = formPass(games);
-  const rowOf = (i) => { const g = games[i], tp = tot.pred[g.id]; return stkRow(R.pred[g.id].p, tp ? tp.ph - tp.pa : 0, g.fm || 0, g.rd || 0); };
+  const rowOf = (i) => { const g = games[i], tp = tot.pred[g.id]; return stkRow(R.pred[g.id].p, tp ? tp.ph - tp.pa : 0, g.fm || 0, g.rd || 0, g.th !== undefined && g.ta !== undefined ? g.th - g.ta : 0); };
   let stack = null, w = null;
   if (cut) {   // la combinaison est apprise sur le passé, puis comparée à l'Elo étalonné seul sur les derniers matchs
     const trI = R.log.filter((x) => x.i < cut), teI = R.log.filter((x) => x.i >= cut);
@@ -436,7 +450,8 @@ function runModel() {
     const raw = 1 / (1 + Math.pow(10, -eloDiff(M, h, a, day) / 400));
     if (!w) return cal(raw);
     const pt = predictTot(M, h, a);
-    return stkP(w, stkRow(raw, pt.ph - pt.pa, formVal(FP.mg, h) - formVal(FP.mg, a), restOf(FP.lastD, h, day) - restOf(FP.lastD, a, day)));
+    const mh = missX(M, h), ma = missX(M, a);
+    return stkP(w, stkRow(raw, pt.ph - pt.pa, formVal(FP.mg, h) - formVal(FP.mg, a), restOf(FP.lastD, h, day) - restOf(FP.lastD, a, day), mh.tal > 0 && ma.tal > 0 ? mh.tal - ma.tal : 0));
   };
   return M;
 }
@@ -621,9 +636,9 @@ function renderModel(M) {
     tl.push([fr(M.tune.aTuned * 100) + ' % contre ' + fr(M.tune.aBase * 100) + ' %', M.tune.used ? 'Victoires bien prédites, même test : le réglage auto est gardé' : 'Victoires bien prédites, même test : le réglage auto ne fait pas mieux, on garde celui de départ']);
   }
   if (M.stack) {
-    tl.push([fr(M.stack.bS, 3) + ' contre ' + fr(M.stack.bC, 3), M.stack.used ? "Brier avec la combinaison de signaux (Elo, attaque-défense, forme, repos) contre l'Elo seul : combinaison gardée" : "Brier avec la combinaison de signaux contre l'Elo seul : ça n'aide pas, on garde l'Elo seul"]);
+    tl.push([fr(M.stack.bS, 3) + ' contre ' + fr(M.stack.bC, 3), M.stack.used ? "Brier avec la combinaison de signaux (Elo, attaque-défense, forme, repos, valeur des joueurs) contre l'Elo seul : combinaison gardée" : "Brier avec la combinaison de signaux contre l'Elo seul : ça n'aide pas, on garde l'Elo seul"]);
     tl.push([fr(M.stack.aS * 100) + ' % contre ' + fr(M.stack.aC * 100) + ' %', 'Victoires bien prédites, même test (combinaison contre Elo seul)']);
-    if (M.wts) tl.push([`Elo ${fr(M.wts[1], 2)}`, `Poids appris : attaque-défense ${fr(M.wts[2], 2)} · forme ${fr(M.wts[3], 2)} · repos ${fr(M.wts[4], 2)}`]);
+    if (M.wts) tl.push([`Elo ${fr(M.wts[1], 2)}`, `Poids appris : attaque-défense ${fr(M.wts[2], 2)} · forme ${fr(M.wts[3], 2)} · repos ${fr(M.wts[4], 2)} · valeur des joueurs ${fr(M.wts[5], 2)}`]);
   }
   if (M.calib) tl.push([fr(M.calib.bCal, 3) + ' contre ' + fr(M.calib.bRaw, 3), M.calib.used ? 'Brier avec et sans étalonnage des pourcentages : étalonnage gardé' : 'Brier avec et sans étalonnage : ça n\'aide pas, on ne l\'applique pas']);
   $('#tune').innerHTML = tl.length ? tl.map(tile).join('') : '<div class="empty">Pas encore assez de matchs pour régler le modèle.</div>';
@@ -648,7 +663,7 @@ function renderModel(M) {
   $('#oddsInfo').textContent = !getKey() ? 'Pas de clé : les cotes Betclic ne sont pas chargées.'
     : db.odds ? `Cotes chargées à ${new Date(db.odds.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${db.odds.items.length} matchs${db.odds.left !== null && db.odds.left !== undefined ? ' · ' + db.odds.left + ' crédits restants ce mois-ci' : ''}`
     : 'Clé enregistrée, cotes pas encore chargées.';
-  $('#modelnote').textContent = `Modèle v3.1 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
+  $('#modelnote').textContent = `Modèle v3.2 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
 }
 
 // ---------- Affichage : onglet Joués ----------
