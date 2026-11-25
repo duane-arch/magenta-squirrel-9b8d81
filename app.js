@@ -178,15 +178,20 @@ async function fetchInjuries() {
   const r = await fetch(INJ_URL);
   if (!r.ok) throw new Error('HTTP ' + r.status);
   const j = await r.json(), teams = {}; let n = 0;
+  const short = (o) => (o && typeof o === 'object' ? Object.keys(o).slice(0, 12).join(',') : typeof o);
+  const t0 = (j.injuries || [])[0], i0 = t0 && (t0.injuries || [])[0];
+  const dbg = `racine: ${short(j)} | équipes: ${(j.injuries || []).length} | équipe: ${short(t0)} | blessure: ${short(i0)} | joueur: ${short(i0 && i0.athlete)} | statut: ${i0 ? JSON.stringify(i0.status || (i0.type && i0.type.description) || null) : '-'}`;
+  const idOf = (at) => { if (!at) return ''; if (at.id) return String(at.id); const m = String(at.$ref || at.href || '').match(/athletes\/(\d+)/); return m ? m[1] : ''; };
   for (const t of j.injuries || []) {
-    const list = [];
+    const tid = String(t.id || (t.team && t.team.id) || ''), list = [];
     for (const it of t.injuries || []) {
-      const at = it.athlete; if (!at || !at.id) continue;
-      list.push({ id: String(at.id), name: at.displayName || at.fullName || 'Joueur', status: String(it.status || (it.type && it.type.description) || '').toLowerCase() });
+      const at = it.athlete || it, id = idOf(at); if (!id) continue;
+      const st = it.status && typeof it.status === 'object' ? (it.status.name || it.status.description || it.status.type) : it.status;
+      list.push({ id, name: at.displayName || at.fullName || at.shortName || 'Joueur', status: String(st || (it.type && (it.type.description || it.type.name)) || '').toLowerCase() });
     }
-    teams[String(t.id)] = list; n += list.length;
+    if (tid) teams[tid] = list; n += list.length;
   }
-  db.inj = { at: new Date().toISOString(), teams, n };
+  db.inj = { at: new Date().toISOString(), teams, n, dbg };
   save();
 }
 // Pour chaque match joué : valeur des joueurs « de rotation » absents (production moyenne au-dessus d'un remplaçant).
@@ -559,6 +564,7 @@ function renderModel(M) {
   if (M.calib) tl.push([fr(M.calib.bCal, 3) + ' contre ' + fr(M.calib.bRaw, 3), M.calib.used ? 'Brier avec et sans étalonnage des pourcentages : étalonnage gardé' : 'Brier avec et sans étalonnage : ça n\'aide pas, on ne l\'applique pas']);
   $('#tune').innerHTML = tl.length ? tl.map(tile).join('') : '<div class="empty">Pas encore assez de matchs pour régler le modèle.</div>';
   const pt = [[`${M.nBox}`, 'Matchs dont on a le détail des joueurs (saison en cours et précédente)']];
+  if (db.inj && db.inj.n === 0 && db.inj.dbg) pt.push(['?', 'Aucun blessé lu. Réponse ESPN : ' + db.inj.dbg]);
   pt.push([db.inj ? `${db.inj.n}` : '–', db.inj ? `Joueurs blessés annoncés par ESPN (chargé à ${new Date(db.inj.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })})` : 'Blessures pas encore chargées']);
   if (M.absT) pt.push([fr(M.absT.w, 3) + ' contre ' + fr(M.absT.w0, 3), `Brier avec et sans les absences, sur les ${M.tune ? M.tune.n : 400} derniers matchs (poids réglé : ${M.prm.ABS})`]);
   else pt.push([M.prm.ABS ? String(M.prm.ABS) : '0', M.nBox < 300 ? "Poids des absences : pas encore assez de matchs détaillés pour le régler" : "Poids des absences réglé à 0 : ça n'améliore pas la prévision sur tes données"]);
