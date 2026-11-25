@@ -445,7 +445,24 @@ function runModel() {
     const w = brierOf(runElo(games, prm, false).log.filter((x) => x.i >= cut)), w0 = brierOf(runElo(games, { ...prm, ABS: 0 }, false).log.filter((x) => x.i >= cut));
     absT = { w, w0 };
   }
-  const M = { elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, fp: FP, nBox, absT, prm, cal, tune, calib, stack, wts: w, log, pred: R.pred, tot, totPrm };
+  const warmG = [];
+  games.forEach((g, i) => { const pr = R.pred[g.id], tp = tot.pred[g.id]; if (pr && !pr.cold && tp && !tp.cold) warmG.push({ g, i, pr, tp }); });
+  let sT = 0, sM = 0;
+  for (const x of warmG) { sT += (x.tp.tot - (x.g.hs + x.g.as)) ** 2; sM += (x.pr.m - (x.g.hs - x.g.as)) ** 2; }
+  const sigT = warmG.length > 50 ? Math.sqrt(sT / warmG.length) : 18, sigM = warmG.length > 50 ? Math.sqrt(sM / warmG.length) : 12;
+  const safe = { win: [0, 0, 0], over: [0, 0, 0], under: [0, 0, 0], hcp: [0, 0, 0] };   // [matchs, réussis, somme des probabilités annoncées]
+  for (const x of warmG) {
+    const { g, pr, tp } = x, act = g.hs + g.as, ph = pr.p;
+    for (const b of safeBets({ ab: 'H' }, { ab: 'A' }, ph, pr.m, tp.tot, sigT, sigM)) {
+      let hit;
+      if (b.kind === 'win') hit = (g.hs > g.as) === (ph >= 0.5);
+      else if (b.kind === 'over') hit = act > b.L;
+      else if (b.kind === 'under') hit = act < b.L;
+      else hit = (b.fav === 'h' ? g.hs - g.as : g.as - g.hs) + b.L > 0;
+      const s = safe[b.kind]; s[0]++; s[1] += hit ? 1 : 0; s[2] += b.p;
+    }
+  }
+  const M = { sigT, sigM, safe, elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, fp: FP, nBox, absT, prm, cal, tune, calib, stack, wts: w, log, pred: R.pred, tot, totPrm };
   M.winP = (h, a, day) => {   // probabilité que le domicile gagne un match à venir
     const raw = 1 / (1 + Math.pow(10, -eloDiff(M, h, a, day) / 400));
     if (!w) return cal(raw);
@@ -520,13 +537,13 @@ function findOdds(g) {
 function oddsBlock(g, M, ctx) {
   const o = findOdds(g); if (!o) return { html: '', bets: [] };
   const H = T(g.h), A = T(g.a), bets = [], parts = [];
-  const sigT = (M.tot.mae || 14) * 1.2533;
+  const sigT = M.sigT || (M.tot.mae || 14) * 1.2533;
   if (o.ml) {
     parts.push(`${esc(A.ab)} <b>${fr(o.ml.a, 2)}</b> · ${esc(H.ab)} <b>${fr(o.ml.h, 2)}</b>`);
     bets.push({ label: `${A.ab} gagne`, p: ctx.pa, odds: o.ml.a }, { label: `${H.ab} gagne`, p: ctx.ph, odds: o.ml.h });
   }
   if (o.sp) {
-    const pc = Phi((ctx.margin + o.sp.pt) / SIG_M);
+    const pc = Phi((ctx.margin + o.sp.pt) / (M.sigM || SIG_M));
     const f = (ab, pt) => `${ab} ${pt > 0 ? '+' : '-'}${fr(Math.abs(pt))}`;
     parts.push(`Handicap ${esc(f(H.ab, o.sp.pt))} (${fr(o.sp.h, 2)}) / ${esc(f(A.ab, -o.sp.pt))} (${fr(o.sp.a, 2)})`);
     bets.push({ label: f(H.ab, o.sp.pt), p: pc, odds: o.sp.h }, { label: f(A.ab, -o.sp.pt), p: 1 - pc, odds: o.sp.a });
@@ -543,6 +560,17 @@ function oddsBlock(g, M, ctx) {
   return { html, bets };
 }
 
+// ---------- Paris les plus sûrs : pour chaque match, les lignes où le modèle donne environ 80 % ----------
+const Z80 = 0.8416, SAFE_WIN = 0.7;
+function safeBets(H, A, ph, margin, tot, sigT, sigM) {
+  const out = [], pa = 1 - ph;
+  if (Math.max(ph, pa) >= SAFE_WIN) out.push({ kind: 'win', label: `${ph >= pa ? H.ab : A.ab} gagne`, p: Math.max(ph, pa) });
+  const L = Math.floor((tot - Z80 * sigT) / 5) * 5, U = Math.ceil((tot + Z80 * sigT) / 5) * 5;
+  out.push({ kind: 'over', label: `Over ${L}`, L, p: 1 - Phi((L - tot) / sigT) }, { kind: 'under', label: `Under ${U}`, L: U, p: Phi((U - tot) / sigT) });
+  const mu = Math.abs(margin), hl = Math.ceil((Z80 * sigM - mu) * 2) / 2, fav = margin >= 0 ? 'h' : 'a';
+  out.push({ kind: 'hcp', fav, L: hl, label: `${fav === 'h' ? H.ab : A.ab} ${hl >= 0 ? '+' : '-'}${fr(Math.abs(hl))}`, p: Phi((mu + hl) / sigM) });
+  return out;
+}
 // ---------- Affichage : onglet À venir ----------
 function upCard(g, M, picks) {
   const H = T(g.h), A = T(g.a), day = dayKey(g.t);
@@ -567,6 +595,8 @@ function upCard(g, M, picks) {
   const ab = [abTxt(ma, A.ab), abTxt(mh, H.ab)].filter(Boolean);
   const abEff = M.prm.ABS * (ma.x - mh.x) / PTS;
   const abLine = ab.length ? `<div class="line">Absents importants · ${ab.join(' · ')}${M.prm.ABS > 0 ? ` → <b>${abEff >= 0 ? esc(H.ab) : esc(A.ab)} ${signed(Math.abs(abEff), 1)} pts</b>` : ''}</div>` : '';
+  const sb = safeBets(H, A, ph, margin, pt.tot, M.sigT, M.sigM);
+  const sbLine = `<div class="line">Paris les plus sûrs · ${sb.map((b) => `<b class="pick">${esc(b.label)}</b> (${(b.p * 100).toFixed(0)} %)`).join(' · ')}</div>`;
   const bt = oddsBlock(g, M, { ph, pa, margin, tot: pt.tot });
   if (picks) for (const b of bt.bets) picks.push({ ...b, g, time });
   return `<div class="card">
@@ -576,12 +606,13 @@ function upCard(g, M, picks) {
     <div class="probs"><span>${esc(A.ab)} ${(pa * 100).toFixed(0)}%</span><span>${esc(H.ab)} ${(ph * 100).toFixed(0)}%</span></div>
     <div class="line">Marge modèle : <b>${esc(winTxt(margin, H, A))}</b></div>
     <div class="line">${l2}</div>
-    <div class="line">${l3}</div>${abLine}${bt.html}</div>`;
+    <div class="line">${l3}</div>${abLine}${sbLine}${bt.html}</div>`;
 }
 function renderUp(M) {
   const box = $('#games'), now = Date.now();
-  const list = db.upcoming.filter((g) => g.live || Date.parse(g.t) > now - 3 * 3600e3);
-  if (!list.length) { box.innerHTML = '<div class="empty">Aucun match à venir trouvé.</div>'; return; }
+  let list = db.upcoming.filter((g) => g.live || Date.parse(g.t) > now - 3 * 3600e3);
+  if (view.upMin) list = list.filter((g) => { const p = M.winP(g.h, g.a, dayKey(g.t)); return Math.max(p, 1 - p) >= view.upMin; });
+  if (!list.length) { box.innerHTML = `<div class="empty">${view.upMin ? 'Aucun match avec une confiance assez haute pour le moment.' : 'Aucun match à venir trouvé.'}</div>`; $('#picks').innerHTML = ''; return; }
   let html = '', cur = '';
   const picks = [];
   for (const g of list) {
@@ -593,7 +624,7 @@ function renderUp(M) {
   const top = picks.filter((b) => b.ev >= EV_PICK).sort((x, y) => y.ev - x.ev).slice(0, 5);
   $('#picks').innerHTML = top.length
     ? `<h2>Paris à valeur (Betclic)</h2><div class="grp picks">` + top.map((b) => `<div class="pk"><div><b>${esc(b.label)}</b> @ ${fr(b.odds, 2)}<span>${esc(T(b.g.a).ab)} @ ${esc(T(b.g.h).ab)} · ${esc(b.time)}</span></div><div class="${b.ev >= EV_SUSPECT ? 'ko' : 'ok'}">${signed(b.ev * 100)} %${b.ev >= EV_SUSPECT ? '<span>à vérifier</span>' : ''}</div></div>`).join('') + `</div><p class="note">Valeur = probabilité du modèle × cote − 1. Un écart très grand vient souvent d'une info que le modèle n'a pas (blessure, repos) : vérifie avant de miser.</p>`
-    : (getKey() ? '' : '<div class="note">Ajoute ta clé gratuite dans l\'onglet Modèle pour voir les cotes Betclic et les paris à valeur.</div>');
+    : '';
 }
 
 // ---------- Affichage : onglet Modèle ----------
@@ -648,6 +679,13 @@ function renderModel(M) {
   if (M.absT) pt.push([fr(M.absT.w, 3) + ' contre ' + fr(M.absT.w0, 3), `Brier avec et sans les absences, sur les ${M.tune ? M.tune.n : 400} derniers matchs (poids réglé : ${M.prm.ABS})`]);
   else pt.push([M.prm.ABS ? String(M.prm.ABS) : '0', M.nBox < 300 ? "Poids des absences : pas encore assez de matchs détaillés pour le régler" : "Poids des absences réglé à 0 : ça n'améliore pas la prévision sur tes données"]);
   $('#players').innerHTML = pt.map(tile).join('');
+  const sf = M.safe, pc = (s) => (s[0] ? Math.round(s[1] / s[0] * 100) + ' %' : '–'), an = (s) => (s[0] ? Math.round(s[2] / s[0] * 100) : 0);
+  $('#safe').innerHTML = [
+    [pc(sf.win), `Vainqueur quand le modèle dépasse ${Math.round(SAFE_WIN * 100)} % : réussite réelle (annoncé ${an(sf.win)} %, ${sf.win[0]} matchs)`],
+    [pc(sf.over), `Over à la ligne « sûre » : réussite réelle (annoncé ${an(sf.over)} %, ${sf.over[0]} matchs)`],
+    [pc(sf.under), `Under à la ligne « sûre » : réussite réelle (annoncé ${an(sf.under)} %, ${sf.under[0]} matchs)`],
+    [pc(sf.hcp), `Handicap « sûr » du favori : réussite réelle (annoncé ${an(sf.hcp)} %, ${sf.hcp[0]} matchs)`],
+  ].map(tile).join('') + `<div class="stat"><b>${fr(M.sigT, 1)} / ${fr(M.sigM, 1)}</b><span>Écart typique sur le total / sur la marge (points) : plus il est bas, plus les paris sûrs sont proches</span></div>`;
   const bins = [[0.5, 0.6], [0.6, 0.7], [0.7, 0.8], [0.8, 1.01]];
   const rows = bins.map(([lo, hi]) => {
     const B = L.filter((x) => Math.max(x.p, 1 - x.p) >= lo && Math.max(x.p, 1 - x.p) < hi);
@@ -663,11 +701,11 @@ function renderModel(M) {
   $('#oddsInfo').textContent = !getKey() ? 'Pas de clé : les cotes Betclic ne sont pas chargées.'
     : db.odds ? `Cotes chargées à ${new Date(db.odds.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${db.odds.items.length} matchs${db.odds.left !== null && db.odds.left !== undefined ? ' · ' + db.odds.left + ' crédits restants ce mois-ci' : ''}`
     : 'Clé enregistrée, cotes pas encore chargées.';
-  $('#modelnote').textContent = `Modèle v3.2 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
+  $('#modelnote').textContent = `Modèle v3.3 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
 }
 
 // ---------- Affichage : onglet Joués ----------
-const view = { team: '', opp: '', season: '', shown: 25 };
+const view = { team: '', opp: '', season: '', shown: 25, upMin: 0 };
 let lastModel = null;
 const seasonLabel = (y) => `${y}-${pad((y + 1) % 100)}`;
 
@@ -777,6 +815,11 @@ document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () 
 for (const [sel, key] of [['#fTeam', 'team'], ['#fOpp', 'opp'], ['#fSeason', 'season']]) {
   $(sel).addEventListener('change', (e) => { view[key] = e.target.value; view.shown = 25; renderPlayed(); });
 }
+document.querySelectorAll('#upFilter button').forEach((b) => b.addEventListener('click', () => {
+  view.upMin = Number(b.dataset.min);
+  document.querySelectorAll('#upFilter button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  if (lastModel) renderUp(lastModel);
+}));
 $('#more').addEventListener('click', () => { view.shown += 25; renderPlayed(); });
 $('#refresh').addEventListener('click', () => refresh(true));
 $('#saveKey').addEventListener('click', () => {

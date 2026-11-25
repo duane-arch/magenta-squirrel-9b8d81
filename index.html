@@ -90,6 +90,9 @@ td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
 th{color:var(--mut);font-weight:500;font-size:12px}
 td.n,th.n{text-align:right}
 
+.seg{display:flex;gap:8px;margin-bottom:12px}
+.seg button{flex:1;min-height:44px;border:1px solid var(--line);border-radius:22px;background:var(--panel);color:var(--mut);font-weight:600;padding:0 12px}
+.seg button[aria-pressed="true"]{background:var(--line);color:var(--acc);border-color:var(--acc)}
 .picks{padding:0 14px}
 .pk{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 0}
 .pk+.pk{border-top:1px solid var(--line)}
@@ -131,6 +134,7 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
   </section>
 
   <section id="tab-up">
+    <div class="seg" id="upFilter" role="group" aria-label="Filtrer les matchs"><button type="button" data-min="0" aria-pressed="true">Tous les matchs</button><button type="button" data-min="0.7" aria-pressed="false">Confiance ≥ 70 %</button></div>
     <div id="picks"></div>
     <div id="games"><div class="empty">Aucune donnée pour l'instant.</div></div>
     <p class="note">Le total prévu vient du modèle pour chaque match. Le verdict Over/Under apparaît dès qu'ESPN publie sa ligne, en général peu avant le match.</p>
@@ -141,6 +145,8 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
     <div id="stats" class="stats"></div>
     <h2>Réglage automatique</h2>
     <div id="tune" class="stats"></div>
+    <h2>Paris sûrs : test sur le passé</h2>
+    <div id="safe" class="stats"></div>
     <h2>Joueurs et absences</h2>
     <div id="players" class="stats"></div>
     <h2>Fiabilité des pourcentages</h2>
