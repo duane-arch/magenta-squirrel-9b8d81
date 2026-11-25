@@ -239,13 +239,18 @@ async function syncPlayers(base, flag) {
   const todo = Object.entries(db.games).filter(([id, g]) => seasonOf(g.t) >= cur - 1 && !boxDb.games[id]).sort((x, y) => (x[1].t < y[1].t ? 1 : -1)).slice(0, BOX_BATCH);
   let n = 0, bad = 0;
   await pool(todo, 6, async ([id]) => {
-    try { const o = await fetchBox(id); if (Object.keys(o).length === 2) boxDb.games[id] = o; else bad++; changed = true; } catch (e) { bad++; }
+    try {
+      const o = await fetchBox(id);
+      if (Object.keys(o).length === 2) boxDb.games[id] = o;
+      else { bad++; if (Date.now() - Date.parse(db.games[id].t) > 3 * 864e5) boxDb.games[id] = {}; }   // pas de détail chez ESPN pour ce match : on ne le redemande plus
+      changed = true;
+    } catch (e) { bad++; }
     n++;
     if (n % 100 === 0) saveBox();
     if (n % 10 === 0 || n === todo.length) setStatus(`Détails des joueurs… (${n}/${todo.length})`);
   });
   if (todo.length) saveBox();
-  if (todo.length && bad === todo.length) msg += ' · détails des joueurs indisponibles (format ou accès)';
+  if (todo.length && bad === todo.length && !Object.values(boxDb.games).some((o) => Object.keys(o).length === 2)) msg += ' · détails des joueurs indisponibles (format ou accès)';
   if (changed) render();
   setStatus(base + msg, flag || !!msg);
 }
