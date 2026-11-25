@@ -180,8 +180,14 @@ async function fetchInjuries() {
   const j = await r.json(), teams = {}; let n = 0;
   const short = (o) => (o && typeof o === 'object' ? Object.keys(o).slice(0, 12).join(',') : typeof o);
   const t0 = (j.injuries || [])[0], i0 = t0 && (t0.injuries || [])[0];
-  const dbg = `racine: ${short(j)} | équipes: ${(j.injuries || []).length} | équipe: ${short(t0)} | blessure: ${short(i0)} | joueur: ${short(i0 && i0.athlete)} | statut: ${i0 ? JSON.stringify(i0.status || (i0.type && i0.type.description) || null) : '-'}`;
-  const idOf = (at) => { if (!at) return ''; if (at.id) return String(at.id); const m = String(at.$ref || at.href || '').match(/athletes\/(\d+)/); return m ? m[1] : ''; };
+  const dbg = `racine: ${short(j)} | équipes: ${(j.injuries || []).length} | équipe: ${short(t0)} | blessure: ${short(i0)} | joueur: ${i0 && i0.athlete ? JSON.stringify(i0.athlete).replace(/"(https?:[^"]{0,90})[^"]*"/g, '"$1…"').slice(0, 420) : '-'} | statut: ${i0 ? JSON.stringify(i0.status || (i0.type && i0.type.description) || null) : '-'}`;
+  const idOf = (at) => {   // l'identifiant du joueur peut être dans id, uid, guid ou dans le lien de sa fiche
+    if (!at) return '';
+    if (at.id) return String(at.id);
+    const cands = [at.uid, at.guid, at.$ref, at.href, ...(Array.isArray(at.links) ? at.links.map((l) => l && l.href) : [])].filter(Boolean).map(String);
+    for (const c of cands) { const m = c.match(/a:(\d{3,})/) || c.match(/\/id\/(\d{3,})/) || c.match(/athletes\/(\d{3,})/); if (m) return m[1]; }
+    return '';
+  };
   for (const t of j.injuries || []) {
     const tid = String(t.id || (t.team && t.team.id) || ''), list = [];
     for (const it of t.injuries || []) {
