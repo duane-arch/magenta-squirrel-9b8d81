@@ -462,7 +462,10 @@ function runModel() {
       const s = safe[b.kind]; s[0]++; s[1] += hit ? 1 : 0; s[2] += b.p;
     }
   }
-  const M = { sigT, sigM, safe, elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, fp: FP, nBox, absT, prm, cal, tune, calib, stack, wts: w, log, pred: R.pred, tot, totPrm };
+  let cMT = 0, vM = 0, vT = 0;
+  for (const x of warmG) { const rm = (x.g.hs - x.g.as) - x.pr.m, rt = (x.g.hs + x.g.as) - x.tp.tot; cMT += rm * rt; vM += rm * rm; vT += rt * rt; }
+  const rho = warmG.length > 50 && vM > 0 && vT > 0 ? Math.max(-0.5, Math.min(0.5, cMT / Math.sqrt(vM * vT))) : 0;
+  const M = { sigT, sigM, safe, rho, elo: R.elo, cnt: R.cnt, st: R.st, pl: PP.pl, tg: PP.tg, fp: FP, nBox, absT, prm, cal, tune, calib, stack, wts: w, log, pred: R.pred, tot, totPrm };
   M.winP = (h, a, day) => {   // probabilité que le domicile gagne un match à venir
     const raw = 1 / (1 + Math.pow(10, -eloDiff(M, h, a, day) / 400));
     if (!w) return cal(raw);
@@ -564,11 +567,11 @@ function oddsBlock(g, M, ctx) {
 const Z80 = 0.8416, SAFE_WIN = 0.7;
 function safeBets(H, A, ph, margin, tot, sigT, sigM) {
   const out = [], pa = 1 - ph;
-  if (Math.max(ph, pa) >= SAFE_WIN) out.push({ kind: 'win', label: `${ph >= pa ? H.ab : A.ab} gagne`, p: Math.max(ph, pa) });
+  if (Math.max(ph, pa) >= SAFE_WIN) out.push({ kind: 'win', side: ph >= pa ? 'h' : 'a', label: `${ph >= pa ? H.ab : A.ab} gagne`, p: Math.max(ph, pa) });
   const L = Math.floor((tot - Z80 * sigT) / 5) * 5, U = Math.ceil((tot + Z80 * sigT) / 5) * 5;
   out.push({ kind: 'over', label: `Over ${L}`, L, p: 1 - Phi((L - tot) / sigT) }, { kind: 'under', label: `Under ${U}`, L: U, p: Phi((U - tot) / sigT) });
   const mu = Math.abs(margin), hl = Math.ceil((Z80 * sigM - mu) * 2) / 2, fav = margin >= 0 ? 'h' : 'a';
-  out.push({ kind: 'hcp', fav, L: hl, label: `${fav === 'h' ? H.ab : A.ab} ${hl >= 0 ? '+' : '-'}${fr(Math.abs(hl))}`, p: Phi((mu + hl) / sigM) });
+  out.push({ kind: 'hcp', fav, side: fav, L: hl, label: `${fav === 'h' ? H.ab : A.ab} ${hl >= 0 ? '+' : '-'}${fr(Math.abs(hl))}`, p: Phi((mu + hl) / sigM) });
   return out;
 }
 // ---------- Affichage : onglet À venir ----------
@@ -596,7 +599,9 @@ function upCard(g, M, picks) {
   const abEff = M.prm.ABS * (ma.x - mh.x) / PTS;
   const abLine = ab.length ? `<div class="line">Absents importants · ${ab.join(' · ')}${M.prm.ABS > 0 ? ` → <b>${abEff >= 0 ? esc(H.ab) : esc(A.ab)} ${signed(Math.abs(abEff), 1)} pts</b>` : ''}</div>` : '';
   const sb = safeBets(H, A, ph, margin, pt.tot, M.sigT, M.sigM);
-  const sbLine = `<div class="line">Paris les plus sûrs · ${sb.map((b) => `<b class="pick">${esc(b.label)}</b> (${(b.p * 100).toFixed(0)} %)`).join(' · ')}</div>`;
+  ctxById[g.id] = { H, A, ph, margin, tot: pt.tot, t: g.t };
+  const chip = (b) => { const line = b.kind === 'win' ? '' : b.L; const on = ticket.legs.some((l) => l.gid === g.id && l.type === (b.kind === 'win' ? 'win' : b.kind) && (b.kind === 'over' || b.kind === 'under' || l.side === b.side)); return `<button type="button" class="chip" aria-pressed="${on}" data-gid="${esc(g.id)}" data-t="${b.kind}" data-s="${b.side || ''}" data-l="${line}">${esc(b.label)} · ${(b.p * 100).toFixed(0)} %</button>`; };
+  const sbLine = `<div class="line">Paris les plus sûrs · touche pour ajouter au ticket</div><div class="chips">${sb.map(chip).join('')}</div>`;
   const bt = oddsBlock(g, M, { ph, pa, margin, tot: pt.tot });
   if (picks) for (const b of bt.bets) picks.push({ ...b, g, time });
   return `<div class="card">
@@ -701,7 +706,7 @@ function renderModel(M) {
   $('#oddsInfo').textContent = !getKey() ? 'Pas de clé : les cotes Betclic ne sont pas chargées.'
     : db.odds ? `Cotes chargées à ${new Date(db.odds.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${db.odds.items.length} matchs${db.odds.left !== null && db.odds.left !== undefined ? ' · ' + db.odds.left + ' crédits restants ce mois-ci' : ''}`
     : 'Clé enregistrée, cotes pas encore chargées.';
-  $('#modelnote').textContent = `Modèle v3.3 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
+  $('#modelnote').textContent = `Modèle v4.0 : Elo pour le vainqueur, avec les absences de joueurs (réglage auto : K ${M.prm.K}, absences ${M.prm.ABS}, terrain ${M.prm.HFA}, match la veille -${M.prm.B2B}, 3e match en 4 soirs -${M.prm.R34}, régression de saison ${Math.round(M.prm.REG * 100)} %) ; attaque et défense de chaque équipe pour le total (réglage automatique : mémoire ${M.totPrm.lam}, prudence ${M.totPrm.k}). Les cotes des bookmakers sont très efficaces : ces écarts sont un point de départ, pas une garantie. Joue avec une mise que tu peux perdre.`;
 }
 
 // ---------- Affichage : onglet Joués ----------
@@ -795,11 +800,155 @@ function renderPlayed() {
 
 function render() {
   const M = runModel(); lastModel = M;
-  renderUp(M); renderModel(M); fillFilters(); renderPlayed();
+  resolveBets(); renderUp(M); renderModel(M); fillFilters(); renderPlayed(); renderJournal(); renderTicket();
+}
+
+// ---------- Ticket (paris simples et combinés) et journal ----------
+const JOURNAL_LS = 'nbaPredict.journal';
+let journal = (() => { try { const v = JSON.parse(localStorage.getItem(JOURNAL_LS)); if (v && Array.isArray(v.bets)) return v; } catch (e) {} return { start: 100, bets: [] }; })();
+const saveJournal = () => { try { localStorage.setItem(JOURNAL_LS, JSON.stringify(journal)); } catch (e) {} };
+const ticket = { legs: [], open: false };
+const ctxById = {};                                   // contexte du modèle pour chaque match à venir affiché
+const invPhi = (p) => { let lo = -6, hi = 6; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; if (Phi(m) < p) lo = m; else hi = m; } return (lo + hi) / 2; };
+const lf = (x) => (Number.isInteger(x) ? String(x) : fr(x));
+const legLabel = (leg, ab) => leg.type === 'win' ? `${ab[leg.side]} gagne` : leg.type === 'over' ? `Over ${lf(leg.line)}` : leg.type === 'under' ? `Under ${lf(leg.line)}` : `${ab[leg.side]} ${leg.line >= 0 ? '+' : '-'}${lf(Math.abs(leg.line))}`;
+// Probabilité qu'un ensemble de sélections d'un même match passent ensemble (marge M et total T liés par la corrélation mesurée).
+function legsJoint(c, legs, rho, sigT, sigM) {
+  let mlo = -Infinity, mhi = Infinity, tlo = -Infinity, thi = Infinity, hasWin = false;
+  for (const l of legs) {
+    if (l.type === 'win') { hasWin = true; if (l.side === 'h') mlo = Math.max(mlo, 0); else mhi = Math.min(mhi, 0); }
+    else if (l.type === 'hcp') { if (l.side === 'h') mlo = Math.max(mlo, -l.line); else mhi = Math.min(mhi, l.line); }
+    else if (l.type === 'over') tlo = Math.max(tlo, l.line);
+    else thi = Math.min(thi, l.line);
+  }
+  if (mlo >= mhi || tlo >= thi) return 0;
+  const muM = hasWin ? sigM * invPhi(Math.min(0.999, Math.max(0.001, c.ph))) : c.margin, muT = c.tot;
+  const pT = (a, b) => Phi((b - muT) / sigT) - Phi((a - muT) / sigT), pM = (a, b) => Phi((b - muM) / sigM) - Phi((a - muM) / sigM);
+  const hasM = isFinite(mlo) || isFinite(mhi), hasT = isFinite(tlo) || isFinite(thi);
+  if (hasM && !hasT) return pM(mlo, mhi);
+  if (hasT && !hasM) return pT(tlo, thi);
+  const a = Math.max(mlo, muM - 5 * sigM), b = Math.min(mhi, muM + 5 * sigM); if (a >= b) return 0;
+  const N = 200, dx = (b - a) / N, cs = sigT * Math.sqrt(1 - rho * rho); let s = 0;
+  for (let i = 0; i < N; i++) {
+    const m = a + (i + 0.5) * dx, z = (m - muM) / sigM, cm = muT + rho * sigT * z;
+    s += Math.exp(-z * z / 2) / (sigM * 2.5066283) * (Phi((thi - cm) / cs) - Phi((tlo - cm) / cs)) * dx;
+  }
+  return s;
+}
+function ticketP(M) {
+  const by = {}; for (const l of ticket.legs) (by[l.gid] = by[l.gid] || []).push(l);
+  let p = 1;
+  for (const gid in by) { const c = ctxById[gid]; if (!c) return null; p *= legsJoint(c, by[gid], M.rho || 0, M.sigT, M.sigM); }
+  return p;
+}
+function addLeg(leg) {
+  const k = (l) => l.gid + '|' + l.type + '|' + (l.side || '');
+  const i = ticket.legs.findIndex((l) => k(l) === k(leg));
+  if (i >= 0) ticket.legs.splice(i, 1);
+  else {
+    if (leg.type === 'over' || leg.type === 'under') ticket.legs = ticket.legs.filter((l) => !(l.gid === leg.gid && (l.type === 'over' || l.type === 'under')));
+    if (leg.type === 'win') ticket.legs = ticket.legs.filter((l) => !(l.gid === leg.gid && l.type === 'win'));
+    ticket.legs.push(leg);
+  }
+}
+function ticketSummary() {
+  const M = lastModel; if (!M) return;
+  const p = ticketP(M), odds = parseFloat(($('#tkOdds') || {}).value), stake = parseFloat(($('#tkStake') || {}).value);
+  const out = [];
+  if (p !== null) {
+    out.push(`Probabilité estimée : <b>${(p * 100).toFixed(0)} %</b> · cote minimale pour ne pas perdre à terme : <b>${p > 0 ? fr(1 / p, 2) : '–'}</b>`);
+    if (odds > 1) {
+      const ev = p * odds - 1;
+      out.push(`Avec ta cote ${fr(odds, 2)} : valeur <b class="${ev > 0 ? 'ok' : 'ko'}">${signed(ev * 100)} %</b>${ev > 0 ? '' : ' (le pari n\'est pas rentable à terme selon le modèle)'}`);
+      if (ev > 0) {
+        const bk = journalStats().bank, kelly = Math.min(0.05, ev / (odds - 1) / 4);
+        out.push(`Mise suggérée : environ <b>${fr(bk * kelly, 2)} €</b> (un quart de Kelly, plafonné à 5 % de la bankroll). Ne mise jamais plus que ce que tu peux perdre.`);
+      }
+    }
+  }
+  $('#tkSum').innerHTML = out.map((x) => `<div class="line">${x}</div>`).join('');
+  $('#tkBarTxt').innerHTML = `${ticket.legs.length} sélection${ticket.legs.length > 1 ? 's' : ''}${p !== null ? ` · ${(p * 100).toFixed(0)} %` : ''}`;
+  $('#tkSave').disabled = !(odds > 1 && stake > 0 && ticket.legs.length);
+}
+function renderTicket() {
+  const box = $('#ticket'), on = ticket.legs.length > 0 && !$('#tab-up').hidden;
+  document.body.classList.toggle('tk', ticket.legs.length > 0);
+  box.hidden = !on; if (!on) return;
+  const rows = ticket.legs.map((l, i) => {
+    const c = ctxById[l.gid]; if (!c) return '';
+    const ab = { h: c.H.ab, a: c.A.ab }, hasLine = l.type !== 'win';
+    return `<div class="tl"><span>${esc(c.A.ab)} @ ${esc(c.H.ab)} · <b>${esc(legLabel(l, ab))}</b></span>${hasLine ? `<input type="number" inputmode="decimal" step="0.5" value="${l.line}" data-i="${i}" aria-label="Ligne">` : '<span></span>'}<button type="button" class="x" data-rm="${i}" aria-label="Retirer">×</button></div>`;
+  }).join('');
+  const keep = { odds: ($('#tkOdds') || {}).value || '', stake: ($('#tkStake') || {}).value || '' };
+  box.innerHTML = `<button type="button" class="tkbar" id="tkBar"><span id="tkBarTxt"></span><span>${ticket.open ? 'Réduire ▾' : 'Ouvrir le ticket ▴'}</span></button>
+    <div class="tkbody" ${ticket.open ? '' : 'hidden'}>${rows}
+      <div class="tk2"><label>Cote Betclic<input id="tkOdds" type="number" inputmode="decimal" step="0.01" min="1.01" value="${esc(keep.odds)}"></label><label>Mise (€)<input id="tkStake" type="number" inputmode="decimal" step="0.5" min="0" value="${esc(keep.stake)}"></label></div>
+      <div id="tkSum"></div>
+      <div class="note">Plusieurs sélections du même match : le calcul tient compte de leur lien, mesuré sur tes données. Entre la ligne exacte proposée par Betclic pour recalculer la probabilité.</div>
+      <div class="tk3"><button type="button" class="more" id="tkClear">Vider</button><button type="button" class="more pri" id="tkSave" disabled>Enregistrer le pari</button></div></div>`;
+  ticketSummary();
+}
+function saveTicket() {
+  const M = lastModel, p = ticketP(M), odds = parseFloat($('#tkOdds').value), stake = parseFloat($('#tkStake').value);
+  if (!(odds > 1 && stake > 0) || !ticket.legs.length) return;
+  const legs = ticket.legs.map((l) => { const c = ctxById[l.gid], ab = { h: c.H.ab, a: c.A.ab }; return { gid: l.gid, type: l.type, side: l.side, line: l.line, label: legLabel(l, ab), ha: c.H.ab, aa: c.A.ab, t: c.t }; });
+  journal.bets.unshift({ id: Date.now(), at: new Date().toISOString(), stake, odds, p, legs, status: 'open' });
+  saveJournal(); ticket.legs = []; ticket.open = false; resolveBets(); renderTicket(); renderJournal();
+  document.querySelectorAll('#games .chip').forEach((b) => b.setAttribute('aria-pressed', 'false'));
+  setStatus('Pari enregistré dans le journal');
+}
+// Résolution automatique avec les résultats ESPN
+function legResult(l) {
+  const g = db.games[l.gid]; if (!g) return null;
+  const act = g.hs + g.as, mg = g.hs - g.as;
+  let v;
+  if (l.type === 'win') v = (l.side === 'h' ? mg : -mg);
+  else if (l.type === 'hcp') v = (l.side === 'h' ? mg : -mg) + l.line;
+  else if (l.type === 'over') v = act - l.line;
+  else v = l.line - act;
+  return v > 0 ? 'won' : v < 0 ? 'lost' : 'push';
+}
+function resolveBets() {
+  let ch = false;
+  for (const b of journal.bets) {
+    if (b.status !== 'open') continue;
+    const rs = b.legs.map(legResult);
+    if (rs.includes('lost')) b.status = 'lost';
+    else if (rs.some((r) => r === null)) continue;
+    else b.status = rs.every((r) => r === 'push') ? 'void' : rs.includes('push') ? 'check' : 'won';
+    b.pnl = b.status === 'won' ? b.stake * (b.odds - 1) : b.status === 'lost' ? -b.stake : 0;
+    ch = true;
+  }
+  if (ch) saveJournal();
+}
+function journalStats() {
+  const B = journal.bets, done = B.filter((b) => b.status === 'won' || b.status === 'lost'), open = B.filter((b) => b.status === 'open');
+  const net = B.reduce((s, b) => s + (b.pnl || 0), 0), staked = done.reduce((s, b) => s + b.stake, 0);
+  const won = done.filter((b) => b.status === 'won').length;
+  return { bank: journal.start + net - open.reduce((s, b) => s + b.stake, 0), net, staked, won, n: done.length, open: open.length, avgP: done.length ? done.reduce((s, b) => s + b.p, 0) / done.length : 0 };
+}
+function betHtml(b) {
+  const st = { open: 'En cours', won: 'Gagné', lost: 'Perdu', void: 'Remboursé', check: 'À vérifier (égalité sur une ligne)' }[b.status];
+  const cls = b.status === 'won' ? 'ok' : b.status === 'lost' ? 'ko' : '';
+  const legs = b.legs.map((l) => { const r = legResult(l); return `<div class="line">${r === 'won' ? '✓' : r === 'lost' ? '✗' : r === 'push' ? '=' : '·'} ${esc(l.aa)} @ ${esc(l.ha)} · ${esc(l.label)}</div>`; }).join('');
+  return `<div class="bet"><div class="bh"><b>${b.legs.length > 1 ? 'Combiné ' + b.legs.length : 'Simple'} · cote ${fr(b.odds, 2)} · mise ${fr(b.stake, 2)} €</b><span class="${cls}">${st}${b.pnl ? ' ' + signed(b.pnl, 2) + ' €' : ''}</span></div>${legs}<div class="line">Probabilité estimée ${(b.p * 100).toFixed(0)} % · ${new Date(b.at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</div><button type="button" class="del" data-del="${b.id}">Supprimer</button></div>`;
+}
+function renderJournal() {
+  const s = journalStats(), tile = ([b, t]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(t)}</span></div>`;
+  $('#jstats').innerHTML = [
+    [fr(s.bank, 2) + ' €', 'Bankroll disponible (mises en cours déduites)'],
+    [signed(s.net, 2) + ' €', `Résultat net (${s.n} paris terminés)`],
+    [s.staked ? signed(s.net / s.staked * 100, 1) + ' %' : '–', 'Rendement : gain net divisé par les mises'],
+    [s.n ? `${Math.round(s.won / s.n * 100)} %` : '–', s.n ? `Paris gagnés, contre ${Math.round(s.avgP * 100)} % annoncés par le modèle` : 'Paris gagnés'],
+  ].map(tile).join('');
+  $('#jstart').value = journal.start;
+  const open = journal.bets.filter((b) => b.status === 'open'), hist = journal.bets.filter((b) => b.status !== 'open');
+  $('#jopen').innerHTML = open.length ? `<h2>En cours</h2>${open.map(betHtml).join('')}` : '';
+  $('#jhist').innerHTML = hist.length ? `<h2>Historique</h2>${hist.map(betHtml).join('')}` : (open.length ? '' : '<div class="empty">Aucun pari enregistré. Dans À venir, touche les paris sûrs pour les ajouter au ticket, entre ta cote Betclic et ta mise, puis enregistre.</div>');
 }
 
 // ---------- Onglets ----------
-const TITLES = { played: 'Matchs joués', up: 'Matchs à venir', model: 'Modèle' };
+const TITLES = { played: 'Matchs joués', up: 'Matchs à venir', journal: 'Journal de paris', model: 'Modèle' };
 function setTab(t) {
   for (const id of Object.keys(TITLES)) $('#tab-' + id).hidden = id !== t;
   document.querySelectorAll('.tab').forEach((b) => {
@@ -807,6 +956,7 @@ function setTab(t) {
     b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on));
   });
   $('#heading').textContent = TITLES[t];
+  renderTicket();
   if (typeof window !== 'undefined' && window.scrollTo) window.scrollTo(0, 0);
 }
 
@@ -820,6 +970,32 @@ document.querySelectorAll('#upFilter button').forEach((b) => b.addEventListener(
   document.querySelectorAll('#upFilter button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
   if (lastModel) renderUp(lastModel);
 }));
+$('#games').addEventListener('click', (e) => {
+  const b = e.target.closest('.chip'); if (!b) return;
+  const t = b.dataset.t, c = ctxById[b.dataset.gid]; if (!c) return;
+  addLeg({ gid: b.dataset.gid, type: t, side: b.dataset.s || undefined, line: t === 'win' ? 0 : Number(b.dataset.l) });
+  const on = ticket.legs.some((l) => l.gid === b.dataset.gid && l.type === t && (t === 'over' || t === 'under' || l.side === b.dataset.s));
+  b.setAttribute('aria-pressed', String(on));
+  document.querySelectorAll(`#games .chip[data-gid="${b.dataset.gid}"][data-t="${t === 'over' ? 'under' : t === 'under' ? 'over' : '\u0000'}"]`).forEach((x) => x.setAttribute('aria-pressed', 'false'));
+  renderTicket();
+});
+$('#ticket').addEventListener('click', (e) => {
+  if (e.target.closest('#tkBar')) { ticket.open = !ticket.open; renderTicket(); return; }
+  const rm = e.target.closest('[data-rm]');
+  if (rm) { ticket.legs.splice(Number(rm.dataset.rm), 1); document.querySelectorAll('#games .chip').forEach((x) => x.setAttribute('aria-pressed', String(ticket.legs.some((l) => l.gid === x.dataset.gid && l.type === x.dataset.t && (x.dataset.t === 'over' || x.dataset.t === 'under' || l.side === x.dataset.s))))); renderTicket(); return; }
+  if (e.target.closest('#tkClear')) { ticket.legs = []; ticket.open = false; document.querySelectorAll('#games .chip').forEach((x) => x.setAttribute('aria-pressed', 'false')); renderTicket(); return; }
+  if (e.target.closest('#tkSave')) saveTicket();
+});
+$('#ticket').addEventListener('input', (e) => {
+  if (e.target.dataset && e.target.dataset.i !== undefined) { const v = parseFloat(e.target.value); if (Number.isFinite(v)) ticket.legs[Number(e.target.dataset.i)].line = v; }
+  ticketSummary();
+});
+$('#jstart').addEventListener('change', (e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v) && v >= 0) { journal.start = v; saveJournal(); renderJournal(); } });
+$('#tab-journal').addEventListener('click', (e) => {
+  const d = e.target.closest('[data-del]'); if (!d) return;
+  if (d.dataset.arm) { journal.bets = journal.bets.filter((b) => String(b.id) !== d.dataset.del); saveJournal(); renderJournal(); return; }
+  d.dataset.arm = '1'; d.textContent = 'Confirmer la suppression';
+});
 $('#more').addEventListener('click', () => { view.shown += 25; renderPlayed(); });
 $('#refresh').addEventListener('click', () => refresh(true));
 $('#saveKey').addEventListener('click', () => {

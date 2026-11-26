@@ -93,6 +93,28 @@ td.n,th.n{text-align:right}
 .seg{display:flex;gap:8px;margin-bottom:12px}
 .seg button{flex:1;min-height:44px;border:1px solid var(--line);border-radius:22px;background:var(--panel);color:var(--mut);font-weight:600;padding:0 12px}
 .seg button[aria-pressed="true"]{background:var(--line);color:var(--acc);border-color:var(--acc)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+button.chip{min-height:40px;padding:0 12px;border-radius:20px;border:1px solid var(--line);background:transparent;color:var(--ok);font:inherit;font-size:12.5px;font-weight:600}
+button.chip[aria-pressed="true"]{background:var(--ok);color:#06150e;border-color:var(--ok)}
+.ticket{position:fixed;left:0;right:0;bottom:calc(132px + env(safe-area-inset-bottom));max-height:62vh;overflow:auto;background:var(--panel);border-top:1px solid var(--acc);border-radius:14px 14px 0 0;padding:0 max(16px,env(safe-area-inset-right)) 0 max(16px,env(safe-area-inset-left))}
+.tkbar{display:flex;justify-content:space-between;align-items:center;width:100%;min-height:48px;background:transparent;border:0;color:var(--acc);font:inherit;font-weight:700;padding:0}
+.tkbody{padding-bottom:14px}
+.tl{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--line)}
+.tl>span:first-child{flex:1;min-width:0}
+.tl input,.tk2 input,.jst input{min-height:44px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:0 10px;font:inherit;width:100%}
+.tl input{width:88px}
+.tl .x{min-width:44px;min-height:44px;border:0;background:transparent;color:var(--mut);font-size:22px}
+.tk2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0}
+.tk2 label,.jst{display:flex;flex-direction:column;gap:4px;color:var(--mut);font-size:12.5px}
+.tk3{display:flex;gap:8px;margin-top:8px}
+.tk3 .more{margin:0}
+.more.pri{background:var(--acc);color:#1a1205;border-color:var(--acc)}
+.more[disabled]{opacity:.5}
+body.tk{padding-bottom:calc(240px + env(safe-area-inset-bottom))}
+.jst{margin:14px 0 4px}
+.bet{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px;display:flex;flex-direction:column;gap:4px}
+.bh{display:flex;justify-content:space-between;gap:8px;font-size:14px}
+.del{align-self:flex-start;margin-top:4px;min-height:44px;background:transparent;border:0;color:var(--mut);font:inherit;font-size:12.5px;padding:0}
 .picks{padding:0 14px}
 .pk{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 0}
 .pk+.pk{border-top:1px solid var(--line)}
@@ -140,6 +162,14 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
     <p class="note">Le total prévu vient du modèle pour chaque match. Le verdict Over/Under apparaît dès qu'ESPN publie sa ligne, en général peu avant le match.</p>
   </section>
 
+  <section id="tab-journal" hidden>
+    <div id="jstats" class="stats"></div>
+    <label class="jst">Bankroll de départ (€)<input id="jstart" type="number" inputmode="decimal" step="1" min="0" value="100"></label>
+    <div id="jopen"></div>
+    <div id="jhist"></div>
+    <p class="note">Les paris sont suivis et gagnés ou perdus automatiquement avec les résultats ESPN. Tout reste enregistré sur ce téléphone.</p>
+  </section>
+
   <section id="tab-model" hidden>
     <h2>Fiabilité du modèle</h2>
     <div id="stats" class="stats"></div>
@@ -162,10 +192,13 @@ nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--nav);border-top
   </section>
 </div>
 
+<div id="ticket" class="ticket" hidden></div>
+
 <nav class="tabs" aria-label="Navigation">
   <div class="tabs-in">
     <button type="button" class="tab" data-tab="played" aria-pressed="false"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg></span><span>Joués</span></button>
     <button type="button" class="tab" data-tab="up" aria-pressed="true"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M8 3v4M16 3v4M3.5 10h17"/></svg></span><span>À venir</span></button>
+    <button type="button" class="tab" data-tab="journal" aria-pressed="false"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3V4z"/><path d="M9 9h6M9 13h6"/></svg></span><span>Journal</span></button>
     <button type="button" class="tab" data-tab="model" aria-pressed="false"><span class="chip"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-6"/></svg></span><span>Modèle</span></button>
   </div>
 </nav>
